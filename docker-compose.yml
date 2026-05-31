@@ -1,0 +1,111 @@
+# ═══════════════════════════════════════════════════════
+# Docker Compose - Medical AI Full Stack
+# Services: Backend (FastAPI), Neo4j, Redis, MinIO
+# Supabase dijalankan sebagai managed service (cloud)
+# ═══════════════════════════════════════════════════════
+
+version: "3.8"
+
+services:
+  # ── FastAPI Backend ──
+  medical_backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: medical_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - model_cache:/root/.cache    # Cache embedding model
+      - ./data:/app/data            # Dataset & training data
+      - ./app:/app/app              # Live-reload source code (dev)
+      - ./.env:/app/.env            # Live-reload env config (dev)
+    depends_on:
+      medical_neo4j:
+        condition: service_healthy
+      medical_redis:
+        condition: service_healthy
+      medical_minio:
+        condition: service_started
+    networks:
+      - medical_network
+
+  # ── Neo4j Graph Database ──
+  # Username lokal HARUS "neo4j" (requirement Neo4j Docker).
+  # Credential cloud (NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD di .env)
+  # tetap dipakai oleh backend app untuk koneksi ke Neo4j Aura.
+  medical_neo4j:
+    image: neo4j:5.23-community
+    container_name: medical_neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474"     # Neo4j Browser
+      - "7687:7687"     # Bolt protocol
+    environment:
+      - NEO4J_AUTH=neo4j/neo4jpassword123
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_server_memory_heap_initial__size=256m
+      - NEO4J_server_memory_heap_max__size=512m
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - medical_network
+
+  # ── Redis (Rate Limiting) ──
+  medical_redis:
+    image: redis:7-alpine
+    container_name: medical_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - medical_network
+
+  # ── MinIO (Object Storage for file uploads) ──
+  medical_minio:
+    image: minio/minio:latest
+    container_name: medical_minio
+    restart: unless-stopped
+    ports:
+      - "9000:9000"     # API
+      - "9001:9001"     # Console
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - medical_network
+
+# ── Volumes ──
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  redis_data:
+  minio_data:
+  model_cache:
+
+# ── Network ──
+networks:
+  medical_network:
+    driver: bridge
+    name: medical_network

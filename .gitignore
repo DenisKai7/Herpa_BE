@@ -1,0 +1,53 @@
+# ═══════════════════════════════════════════
+# .gitignore - Medical AI Backend
+# ═══════════════════════════════════════════
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual Environment ──
+venv/
+.venv/
+env/
+
+# ── Environment Variables (SENSITIVE) ──
+.env
+.env.local
+.env.production
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── ML Models (large binary files) ──
+app/agent/intent_model.pkl
+*.pkl
+*.pt
+*.bin
+*.onnx
+
+# ── Logs ──
+*.log
+training_pipeline.log
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── Docker ──
+docker-compose.override.yml
+
+# ── Misc ──
+*.bak
+*.tmp
+.cache/
