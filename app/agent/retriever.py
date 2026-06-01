@@ -16,7 +16,7 @@ Setiap intent memiliki retriever khusus:
 import logging
 from typing import Any
 
-from app.core.database import get_neo4j_session, supabase
+from app.core.database import neo4j_driver, supabase
 from app.core.embedding import embed_text
 
 logger = logging.getLogger(__name__)
@@ -82,27 +82,34 @@ def _graph_search(query: str, cypher_query: str) -> list[dict[str, Any]]:
     """
     Menjalankan Cypher query di Neo4j untuk mendapatkan relasi antar entitas.
 
+    Menggunakan driver.execute_query() yang memiliki built-in auto-retry
+    untuk koneksi defunct/expired (SessionExpired, ServiceUnavailable).
+
     Graph model yang diharapkan:
-    (:Plant)-[:HAS_COMPOUND]->(:Compound)
-    (:Plant)-[:TREATS]->(:Symptom)
+    (:Herb)-[:HAS_COMPOUND]->(:Compound)
+    (:Herb)-[:USED_FOR]->(:TherapeuticUse)
     (:Compound)-[:INTERACTS_WITH]->(:Drug)
-    (:Plant)-[:BELONGS_TO]->(:Family)
 
     Args:
         query: Parameter $query untuk Cypher query.
         cypher_query: String Cypher query yang akan dijalankan.
 
     Returns:
-        List of dict: Record hasil Cypher query.
+        List of dict: Record hasil Cypher query. Empty list on failure.
     """
     try:
-        with get_neo4j_session() as session:
-            result = session.run(cypher_query, parameters={"query": query})
-            records = [record.data() for record in result]
-            logger.info(f"Graph search: {len(records)} records found.")
-            return records
+        records, _, _ = neo4j_driver.execute_query(
+            cypher_query,
+            parameters_={"query": query},
+        )
+        result = [record.data() for record in records]
+        logger.info(f"Graph search: {len(result)} records found.")
+        return result
     except Exception as e:
-        logger.error(f"Graph search error: {e}", exc_info=True)
+        logger.error(
+            f"Graph database connectivity lost or query failed: {e}",
+            exc_info=True,
+        )
         return []
 
 

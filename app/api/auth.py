@@ -10,8 +10,9 @@ Keamanan:
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi_limiter.depends import RateLimiter
+from gotrue.errors import AuthApiError
 
 from app.core.database import supabase
 from app.core.dependencies import verify_user
@@ -140,11 +141,17 @@ async def login(req: LoginRequest) -> AuthResponse:
 
     except HTTPException:
         raise
+    except AuthApiError as e:
+        logger.warning(f"Login failed for {req.email}: {e.message}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email atau password yang Anda masukkan salah. Silakan periksa kembali.",
+        )
     except Exception as e:
         logger.error(f"Login error for {req.email}: {e}", exc_info=True)
         raise HTTPException(
-            status_code=401,
-            detail="Login gagal. Pastikan kredensial benar.",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Terjadi kesalahan server saat memproses login. Silakan coba lagi nanti.",
         )
 
 
