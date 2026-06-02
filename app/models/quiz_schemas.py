@@ -26,7 +26,9 @@ class QuizQuestion(BaseModel):
     )
     pertanyaan: str = Field(description="Teks pertanyaan kuis")
     opsi_jawaban: list[QuizOption] = Field(
-        description="Minimal 4 opsi jawaban pilihan ganda"
+        min_length=4,
+        max_length=4,
+        description="Tepat 4 opsi jawaban pilihan ganda (A, B, C, D)"
     )
     jawaban_benar: str = Field(
         description="Label jawaban yang benar, misal: 'A'"
@@ -37,6 +39,20 @@ class QuizQuestion(BaseModel):
             "Format: array of strings, setiap elemen satu langkah."
         )
     )
+    penjelasan_salah: str = Field(
+        description="Penjelasan singkat mengapa pilihan jawaban lainnya salah atau jebakan yang sering terjadi"
+    )
+
+
+class PerformanceAnalysis(BaseModel):
+    """Analisis performa hasil pengerjaan kuis."""
+
+    sorotan: list[str] = Field(
+        description="Daftar poin sorotan mengenai konsep materi yang dikuasai pengguna berdasarkan topik kuis"
+    )
+    area_fokus: list[str] = Field(
+        description="Daftar poin area fokus atau kelemahan konsep materi yang perlu dipelajari lebih lanjut"
+    )
 
 
 class QuizResponse(BaseModel):
@@ -45,4 +61,7 @@ class QuizResponse(BaseModel):
     topik: str = Field(description="Topik utama dari kuis ini")
     daftar_soal: list[QuizQuestion] = Field(
         description="Daftar pertanyaan kuis yang di-generate"
+    )
+    analisis_performa: PerformanceAnalysis = Field(
+        description="Analisis performa hasil pengerjaan kuis secara akademis"
     )
