@@ -125,20 +125,22 @@ async def upload_file(
 
         # ── Upload ke MinIO ──
         unique_name = f"{uuid.uuid4()}.{ext}"
-        bucket = settings.MINIO_BUCKET
+        bucket_name = "chat-attachments"
+        if not minio_client.bucket_exists(bucket_name):
+            minio_client.make_bucket(bucket_name)
 
         minio_client.put_object(
-            bucket,
+            bucket_name,
             unique_name,
             io.BytesIO(file_data),
             len(file_data),
             content_type=content_type or "application/octet-stream",
         )
-        logger.info(f"File uploaded to MinIO: {bucket}/{unique_name}")
+        logger.info(f"File uploaded to MinIO: {bucket_name}/{unique_name}")
 
         return UploadResponse(
             filename=unique_name,
-            url=f"minio:{bucket}/{unique_name}",
+            url=f"minio:{bucket_name}/{unique_name}",
             extracted_text=extracted_content,
         )
 

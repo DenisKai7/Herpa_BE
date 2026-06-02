@@ -12,8 +12,12 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════
 # MINIO CLIENT (Object Storage)
 # ═══════════════════════════════════════════
+# Clean protocol prefix if present
+raw_endpoint = settings.MINIO_ENDPOINT
+cleaned_endpoint = raw_endpoint.replace("http://", "").replace("https://", "")
+
 minio_client = Minio(
-    endpoint=settings.MINIO_ENDPOINT,
+    endpoint=cleaned_endpoint,
     access_key=settings.MINIO_ACCESS_KEY,
     secret_key=settings.MINIO_SECRET_KEY,
     secure=settings.MINIO_SECURE,
