@@ -126,17 +126,37 @@ async def upload_file(
         # ── Upload ke MinIO ──
         unique_name = f"{uuid.uuid4()}.{ext}"
         bucket_name = "chat-attachments"
-        if not minio_client.bucket_exists(bucket_name):
-            minio_client.make_bucket(bucket_name)
 
-        minio_client.put_object(
-            bucket_name,
-            unique_name,
-            io.BytesIO(file_data),
-            len(file_data),
-            content_type=content_type or "application/octet-stream",
-        )
-        logger.info(f"File uploaded to MinIO: {bucket_name}/{unique_name}")
+        try:
+            # Defensive bucket verification
+            if not minio_client.bucket_exists(bucket_name):
+                logger.info(f"Bucket '{bucket_name}' does not exist, creating...")
+                minio_client.make_bucket(bucket_name)
+                logger.info(f"Bucket '{bucket_name}' created successfully.")
+
+            # Upload file object
+            minio_client.put_object(
+                bucket_name,
+                unique_name,
+                io.BytesIO(file_data),
+                len(file_data),
+                content_type=content_type or "application/octet-stream",
+            )
+            logger.info(f"File uploaded to MinIO: {bucket_name}/{unique_name}")
+
+        except Exception as minio_error:
+            logger.error(
+                f"MinIO upload failed: {minio_error}. "
+                f"Check MINIO_ENDPOINT, credentials, and service availability.",
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Gagal mengunggah file ke object storage. "
+                    f"Error: {type(minio_error).__name__}"
+                ),
+            )
 
         return UploadResponse(
             filename=unique_name,

@@ -39,6 +39,42 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent-worker")
 # INTERNAL HELPERS
 # ═══════════════════════════════════════════
 
+def _preprocess_file_context(file_context: Optional[str]) -> Optional[str]:
+    """
+    Defensive preprocessing untuk file context dari upload.
+
+    Melakukan:
+    1. Validasi bahwa string tidak empty.
+    2. Truncate ke 4000 karakter untuk mencegah context window overflow.
+    3. Strip whitespace berlebih.
+
+    Args:
+        file_context: Raw file context text dari OCR/ekstraksi.
+
+    Returns:
+        Cleaned dan truncated file context, atau None jika tidak ada.
+    """
+    if not file_context or not file_context.strip():
+        return None
+
+    # Strip whitespace
+    cleaned = file_context.strip()
+
+    # Defensive truncation untuk mencegah token overflow (4000 chars safety limit)
+    if len(cleaned) > 4000:
+        logger.warning(
+            f"File context too long ({len(cleaned)} chars), "
+            f"truncating to 4000 chars to prevent LLM context overflow."
+        )
+        cleaned = cleaned[:4000]
+
+    logger.info(
+        f"File context preprocessed: {len(cleaned)} chars "
+        f"(original: {len(file_context)} chars)"
+    )
+    return cleaned
+
+
 def _retrieve_context(intent: str, query: str) -> str:
     """
     Memilih dan menjalankan retriever berdasarkan intent yang terdeteksi.
@@ -95,6 +131,16 @@ def _process_query_sync(
         f"Query: '{query[:80]}...' | Mode: {ai_mode}"
     )
 
+    # ── CAPTURE UPLOADED FILE PAYLOAD DATA ──
+    # Validate, strip whitespace, and truncate to 4000 chars to prevent
+    # 422 Unprocessable Entity crashes from context window overflow.
+    file_data_content = _preprocess_file_context(file_context)
+    if file_data_content:
+        logger.info(
+            f"File context captured: {len(file_data_content)} chars "
+            f"(will be injected into LLM system prompt)"
+        )
+
     # ── QUIZ INTENT: Agentic Tool-Calling ──
     if intent == "generate_quiz":
         try:
@@ -102,7 +148,7 @@ def _process_query_sync(
                 topic=query,
                 jumlah_soal=3,
                 ai_mode=ai_mode,
-                file_context=file_context,
+                file_context=file_data_content,
             )
             return {
                 "intent_detected": "quiz_rendered",
@@ -129,7 +175,7 @@ def _process_query_sync(
         context=context_data,
         ai_mode=ai_mode,
         intent=intent,
-        file_context=file_context,
+        file_context=file_data_content,
     )
 
     return {
@@ -200,6 +246,14 @@ def _stream_query_sync(
     # Yield intent terlebih dahulu
     yield {"event": "intent", "data": intent}
 
+    # ── CAPTURE UPLOADED FILE PAYLOAD DATA ──
+    file_data_content = _preprocess_file_context(file_context)
+    if file_data_content:
+        logger.info(
+            f"[Stream] File context captured: {len(file_data_content)} chars "
+            f"(will be injected into streaming LLM prompt)"
+        )
+
     # ── QUIZ: Return full payload (tidak di-stream) ──
     if intent == "generate_quiz":
         try:
@@ -207,7 +261,7 @@ def _stream_query_sync(
                 topic=query,
                 jumlah_soal=3,
                 ai_mode=ai_mode,
-                file_context=file_context,
+                file_context=file_data_content,
             )
             yield {
                 "event": "quiz",
@@ -235,7 +289,7 @@ def _stream_query_sync(
             context=context_data,
             ai_mode=ai_mode,
             intent=intent,
-            file_context=file_context,
+            file_context=file_data_content,
         ):
             full_response += token
             yield {"event": "token", "data": token}

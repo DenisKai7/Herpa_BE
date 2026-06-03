@@ -256,11 +256,21 @@ def _build_system_prompt(
 
     file_instruction = ""
     if file_context:
+        # Truncate to 4000 chars to prevent context window overflow
+        truncated_context = file_context[:4000]
         file_instruction = f"""
-═══ ISI FILE UPLOAD PENGGUNA ═══
-{file_context[:3000]}
-═══ AKHIR FILE UPLOAD ═══
-Gunakan isi file di atas sebagai konteks tambahan untuk menjawab pertanyaan."""
+
+[DATA KONTEKS BERKAS/FILE YANG DIUNGGAH OLEH USER]
+{truncated_context}
+
+CRITICAL PROTOCOL: User telah melampirkan berkas dokumen/gambar medis di atas. Anda WAJIB menganalisis dan mempelajari data konteks berkas tersebut dengan saksama untuk menghasilkan jawaban yang valid, akurat, dan sangat relevan dengan isi berkas tersebut.
+
+ATURAN PENGGUNAAN KONTEKS FILE:
+1. Baca dan analisis konten file yang diunggah secara menyeluruh sebelum menjawab.
+2. Jika terjadi konflik antara konten file dan database, PRIORITASKAN konten file.
+3. Jika pertanyaan user berkaitan dengan file, jawab berdasarkan file terlebih dahulu.
+4. Kutip bagian spesifik dari file saat memberikan jawaban.
+5. Jika konteks file tidak cukup, lengkapi dengan pengetahuan dari database."""
 
     return f"""Anda adalah Asisten AI Farmasi & Edukasi untuk Ensiklopedia Tanaman Obat Indonesia.
 
