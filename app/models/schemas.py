@@ -84,6 +84,18 @@ class ChatRequest(BaseModel):
         None,
         description="Teks hasil OCR dari file upload",
     )
+    file_url: Optional[str] = Field(
+        None,
+        description="URL file upload (MinIO)",
+    )
+    file_name: Optional[str] = Field(
+        None,
+        description="Nama file asli",
+    )
+    file_type: Optional[str] = Field(
+        None,
+        description="MIME type file",
+    )
 
 
 class ChatActionRequest(BaseModel):

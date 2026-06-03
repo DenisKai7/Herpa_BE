@@ -75,6 +75,9 @@ def _save_messages_to_db(
     ai_content: str,
     is_quiz: bool,
     intent: str,
+    file_url: Optional[str] = None,
+    file_name: Optional[str] = None,
+    file_type: Optional[str] = None,
 ) -> str:
     """
     Menyimpan pesan user dan AI response ke database.
@@ -88,6 +91,9 @@ def _save_messages_to_db(
         ai_content: Respons AI (teks atau JSON quiz).
         is_quiz: True jika response adalah quiz payload.
         intent: Intent yang terdeteksi oleh NLU.
+        file_url: URL file upload (opsional).
+        file_name: Nama file asli (opsional).
+        file_type: MIME type file (opsional).
 
     Returns:
         chat_id (str): UUID chat session (baru atau existing).
@@ -104,11 +110,20 @@ def _save_messages_to_db(
         chat_id = chat_data.data[0]["id"]
         logger.info(f"New chat session created: {chat_id}")
 
+    user_meta = {}
+    if file_url:
+        user_meta = {
+            "file_url": file_url,
+            "file_name": file_name,
+            "file_type": file_type
+        }
+
     supabase.table("messages").insert([
         {
             "chat_id": chat_id,
             "role": "user",
             "content": user_message,
+            "metadata": user_meta,
         },
         {
             "chat_id": chat_id,
@@ -178,6 +193,9 @@ async def chat_endpoint(
             ai_content=db_content,
             is_quiz=is_quiz,
             intent=pipeline_result["intent_detected"],
+            file_url=req.file_url,
+            file_name=req.file_name,
+            file_type=req.file_type,
         )
 
         return ChatResponse(
@@ -268,6 +286,9 @@ async def chat_stream_endpoint(
                             ai_content=db_content,
                             is_quiz=is_quiz,
                             intent=detected_intent,
+                            file_url=req.file_url,
+                            file_name=req.file_name,
+                            file_type=req.file_type,
                         )
                     except Exception as db_err:
                         logger.error(

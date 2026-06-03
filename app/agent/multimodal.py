@@ -9,15 +9,43 @@ Modul ini bertanggung jawab untuk:
 Hasil ekstraksi digunakan sebagai file_context dalam pipeline AI.
 """
 
+import base64
 import io
 import logging
+import os
 from typing import Final
 
 import fitz  # PyMuPDF
 import pytesseract
+from huggingface_hub import InferenceClient
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════
+# VISION LLM CLIENT (Fallback untuk OCR kosong)
+# ═══════════════════════════════════════════
+_vision_client = InferenceClient(
+    provider="auto",
+    api_key=os.getenv("HF_API_TOKEN", ""),
+)
+
+# Model multimodal/vision untuk deskripsi gambar
+_VISION_MODEL = "meta-llama/Llama-3.2-11B-Vision-Instruct"
+
+# Prompt analitis untuk vision model
+_VISION_ANALYSIS_PROMPT = (
+    "Analyze this medical/chemical image closely. "
+    "Extract and write a comprehensive, factual textual description "
+    "of all molecular formulas, chemical compound graphs, medicinal plant "
+    "structures, diagnostic lab charts, or any text visible in this image. "
+    "Write the description in Indonesian (Bahasa Indonesia). "
+    "If you see a plant, describe its morphology, leaf shape, flower, "
+    "and any identifiable botanical features. "
+    "If you see chemical structures, describe the functional groups, "
+    "bonds, and molecular formula. "
+    "Be as detailed and factual as possible."
+)
 
 # ═══════════════════════════════════════════
 # KONSTANTA FILE PROCESSING
@@ -117,27 +145,118 @@ def _extract_from_pdf(file_bytes: bytes) -> str:
 def _extract_from_image(file_bytes: bytes) -> str:
     """
     Mengekstrak teks dari gambar menggunakan Tesseract OCR.
-
-    Mendukung bahasa Indonesia (ind) dan Inggris (eng).
+    Jika OCR menghasilkan < 10 karakter, otomatis fallback ke
+    Vision LLM untuk deskripsi visual analitis.
 
     Args:
         file_bytes: Bytes konten file gambar.
 
     Returns:
-        Teks yang diekstrak dari gambar via OCR.
+        Teks yang diekstrak dari gambar via OCR atau deskripsi Vision LLM.
 
     Raises:
-        RuntimeError: Jika OCR gagal atau gambar corrupt.
+        RuntimeError: Jika OCR dan Vision fallback gagal.
     """
     try:
         image = Image.open(io.BytesIO(file_bytes))
         extracted_text: str = pytesseract.image_to_string(image, lang="ind+eng")
 
-        logger.info(f"OCR extracted: {len(extracted_text)} chars from image.")
+        ocr_clean = extracted_text.strip()
+        logger.info(f"OCR extracted: {len(ocr_clean)} chars from image.")
+
+        # Jika OCR berhasil mengekstrak teks yang cukup, gunakan hasilnya
+        if len(ocr_clean) >= 10:
+            return extracted_text
+
+        # ── FALLBACK: Vision LLM Description ──
+        logger.warning(
+            f"OCR yielded only {len(ocr_clean)} chars (< 10). "
+            "Triggering Vision LLM fallback for image description."
+        )
+        vision_description = _describe_image_with_vision(file_bytes)
+        if vision_description and vision_description.strip():
+            return vision_description
+
+        # Jika Vision juga gagal, return apapun yang OCR hasilkan
+        logger.warning("Vision LLM fallback also produced no output. Using raw OCR result.")
         return extracted_text
+
     except Exception as e:
-        logger.error(f"OCR extraction failed: {e}", exc_info=True)
-        raise RuntimeError(f"Gagal melakukan OCR pada gambar: {e}") from e
+        logger.error(f"Image extraction failed: {e}", exc_info=True)
+        raise RuntimeError(f"Gagal memproses gambar: {e}") from e
+
+
+def _describe_image_with_vision(file_bytes: bytes) -> str:
+    """
+    Mendeskripsikan konten visual gambar menggunakan Vision LLM (VLM).
+
+    Digunakan sebagai fallback ketika OCR menghasilkan teks kosong/minimal,
+    misalnya untuk gambar struktur kimia, diagram, atau foto tanaman obat
+    yang tidak mengandung teks tercetak.
+
+    Args:
+        file_bytes: Bytes konten file gambar.
+
+    Returns:
+        String deskripsi visual dalam Bahasa Indonesia.
+        Mengembalikan string kosong jika Vision LLM gagal.
+    """
+    api_key = os.getenv("HF_API_TOKEN", "")
+    if not api_key:
+        logger.warning("HF_API_TOKEN not set, cannot call Vision LLM.")
+        return ""
+
+    try:
+        # Encode gambar ke base64 data URI
+        b64_image = base64.b64encode(file_bytes).decode("utf-8")
+
+        # Deteksi MIME type dari header bytes
+        mime = "image/jpeg"
+        if file_bytes[:8].startswith(b"\x89PNG"):
+            mime = "image/png"
+        elif file_bytes[:4].startswith(b"RIFF") and file_bytes[8:12] == b"WEBP":
+            mime = "image/webp"
+
+        data_uri = f"data:{mime};base64,{b64_image}"
+
+        logger.info(
+            f"Calling Vision LLM ({_VISION_MODEL}) for image description "
+            f"({len(file_bytes)} bytes, {mime})..."
+        )
+
+        response = _vision_client.chat.completions.create(
+            model=_VISION_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_uri},
+                        },
+                        {
+                            "type": "text",
+                            "text": _VISION_ANALYSIS_PROMPT,
+                        },
+                    ],
+                }
+            ],
+            max_tokens=1024,
+        )
+
+        description = response.choices[0].message.content or ""
+        logger.info(
+            f"Vision LLM returned {len(description)} chars of image description."
+        )
+        return description.strip()
+
+    except Exception as e:
+        logger.error(
+            f"Vision LLM description failed: {e}. "
+            "Falling back to empty OCR result.",
+            exc_info=True,
+        )
+        return ""
 
 
 def _extract_from_text(file_bytes: bytes) -> str:
