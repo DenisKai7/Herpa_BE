@@ -518,21 +518,20 @@ def _build_quiz_system_prompt(
     """
     file_instruction = ""
     if file_context:
-        # Truncate to 4000 chars to prevent context window overflow
-        truncated = file_context[:4000]
+        # Truncate to 3500 chars to leave room for directive text
+        safe_context = file_context[:3500]
         file_instruction = f"""
 
-[DATA KONTEKS BERKAS/FILE YANG DIUNGGAH OLEH USER]
-{truncated}
+═══ DATA KONTEKS FILE YANG DIUNGGAH USER (PRIORITAS TERTINGGI) ═══
+{safe_context}
+═══ AKHIR DATA FILE ═══
 
-CRITICAL PROTOCOL: User telah melampirkan berkas dokumen/gambar medis. Anda WAJIB memprioritaskan konten file ini saat membuat soal kuis. Buat pertanyaan yang langsung menguji pemahaman konsep, fakta, dan informasi yang terdapat dalam file yang diunggah.
-
-ATURAN PEMBUATAN KUIS BERBASIS FILE:
-1. Buat pertanyaan terutama dari konten file yang diunggah.
-2. Fokus pada konsep kunci, definisi, mekanisme, dan fakta dari file.
-3. Jika file berisi data medis/farmasi spesifik, gunakan sebagai materi soal.
-4. Lengkapi dengan pengetahuan database hanya jika konten file tidak cukup.
-5. Pastikan semua pertanyaan valid dan dapat dijawab berdasarkan konten file."""
+CRITICAL DIRECTIVE:
+1. User telah melampirkan berkas dokumen/gambar medis. WAJIB prioritaskan konten file ini saat membuat soal kuis.
+2. Buat pertanyaan yang langsung menguji pemahaman konsep, fakta, dan informasi dari file di atas.
+3. JANGAN buat soal generik yang tidak terkait dengan isi file.
+4. Fokus pada senyawa, mekanisme, dan data spesifik yang ada dalam file.
+5. Lengkapi dengan database hanya jika konten file tidak cukup untuk jumlah soal yang diminta."""
 
     # Scope-specific generation instructions
     if is_broad:

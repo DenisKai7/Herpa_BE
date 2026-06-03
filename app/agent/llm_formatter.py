@@ -244,7 +244,7 @@ def _build_system_prompt(
         context: Konteks dari GraphRAG retriever (vector + graph results).
         ai_mode: Persona AI yang dipilih user.
         intent: Intent yang terdeteksi oleh NLU router.
-        file_context: Teks dari file upload OCR (opsional).
+        file_context: Teks dari file upload OCR/Vision (opsional).
 
     Returns:
         System prompt string yang siap dikirim ke LLM.
@@ -254,25 +254,7 @@ def _build_system_prompt(
         intent, "Jawab pertanyaan berdasarkan data yang tersedia."
     )
 
-    file_instruction = ""
-    if file_context:
-        # Truncate to 4000 chars to prevent context window overflow
-        truncated_context = file_context[:4000]
-        file_instruction = f"""
-
-[DATA KONTEKS BERKAS/FILE YANG DIUNGGAH OLEH USER]
-{truncated_context}
-
-CRITICAL PROTOCOL: User telah melampirkan berkas dokumen/gambar medis di atas. Anda WAJIB menganalisis dan mempelajari data konteks berkas tersebut dengan saksama untuk menghasilkan jawaban yang valid, akurat, dan sangat relevan dengan isi berkas tersebut.
-
-ATURAN PENGGUNAAN KONTEKS FILE:
-1. Baca dan analisis konten file yang diunggah secara menyeluruh sebelum menjawab.
-2. Jika terjadi konflik antara konten file dan database, PRIORITASKAN konten file.
-3. Jika pertanyaan user berkaitan dengan file, jawab berdasarkan file terlebih dahulu.
-4. Kutip bagian spesifik dari file saat memberikan jawaban.
-5. Jika konteks file tidak cukup, lengkapi dengan pengetahuan dari database."""
-
-    return f"""Anda adalah Asisten AI Farmasi & Edukasi untuk Ensiklopedia Tanaman Obat Indonesia.
+    system_message = f"""Anda adalah Asisten AI Farmasi & Edukasi untuk Ensiklopedia Tanaman Obat Indonesia.
 
 ═══ IDENTITAS PERSONA: {ai_mode.upper()} ═══
 Target pengguna: {persona['greeting']} ({ai_mode})
@@ -295,10 +277,26 @@ Gaya bahasa: {persona['style']}
 - Gunakan markdown untuk formatting.
 - Struktur jawaban dengan heading, bullet points, dan penekanan yang tepat.
 - Ikuti struktur respons yang ditetapkan dalam Behavioral Blueprint di atas.
-{file_instruction}
+- WAJIB: Pastikan setiap tag markdown dibuka DAN ditutup dengan benar (bold, heading, list)."""
+
+    file_context_text = file_context
+    if file_context_text:
+        file_context_text = file_context_text[:3500]
+        system_message += f"\n\n[CONTEXT ATTACHMENT IMAGE DATA]\n{file_context_text.strip()}\n"
+        system_message += (
+            "\nCRITICAL DIRECTIVE:\n"
+            "1. Skip standard greetings and intros. Look at the context attachment data above.\n"
+            "2. Answer the user's specific chemical/botanical questions cleanly and directly.\n"
+            "3. Ensure the text response is completely closed and contains no truncated markdown brackets."
+        )
+
+    system_message += f"""
+
 ═══ DATA DATABASE MULAI ═══
 {context}
 ═══ DATA DATABASE SELESAI ═══"""
+
+    return system_message
 
 
 def generate_strict_response(

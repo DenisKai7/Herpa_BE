@@ -60,13 +60,14 @@ def _preprocess_file_context(file_context: Optional[str]) -> Optional[str]:
     # Strip whitespace
     cleaned = file_context.strip()
 
-    # Defensive truncation untuk mencegah token overflow (4000 chars safety limit)
-    if len(cleaned) > 4000:
+    # Defensive truncation — 3500 chars to leave room for directive text
+    # that gets appended in llm_formatter (prevents context window overflow)
+    if len(cleaned) > 3500:
         logger.warning(
             f"File context too long ({len(cleaned)} chars), "
-            f"truncating to 4000 chars to prevent LLM context overflow."
+            f"truncating to 3500 chars to prevent LLM context overflow."
         )
-        cleaned = cleaned[:4000]
+        cleaned = cleaned[:3500]
 
     logger.info(
         f"File context preprocessed: {len(cleaned)} chars "

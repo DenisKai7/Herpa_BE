@@ -270,14 +270,13 @@ def retrieve_education_corpus(query: str, limit: int = 5) -> str:
 
     # ── STEP 2: Graph Search ──
     cypher = """
-    MATCH (t:Topic)
-    WHERE toLower(t.name) CONTAINS toLower($query)
-       OR toLower(t.description) CONTAINS toLower($query)
-    OPTIONAL MATCH (t)-[:RELATED_TO]->(rt:Topic)
-    OPTIONAL MATCH (t)-[:CONTAINS_CONCEPT]->(c:Concept)
-    RETURN t.name AS topik, t.description AS deskripsi,
-           collect(DISTINCT rt.name) AS topik_terkait,
-           collect(DISTINCT c.name) AS konsep_kunci
+    MATCH (h:Herb)
+    WHERE toLower(h.name) CONTAINS toLower($query)
+    OPTIONAL MATCH (h)-[:HAS_COMPOUND]->(c:Compound)
+    OPTIONAL MATCH (h)-[:USED_FOR]->(t:TherapeuticUse)
+    RETURN h.name AS topik, h.name AS deskripsi,
+           collect(DISTINCT c.name) AS konsep_kunci,
+           collect(DISTINCT t.name) AS topik_terkait
     LIMIT 5
     """
     graph_results = _graph_search(query, cypher)
