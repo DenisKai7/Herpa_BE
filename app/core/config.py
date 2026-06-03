@@ -4,6 +4,7 @@ Menggunakan pydantic-settings untuk memuat environment variables secara type-saf
 """
 
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 from functools import lru_cache
 
 
@@ -27,8 +28,8 @@ class Settings(BaseSettings):
     # ─── REDIS (Rate Limiting) ───
     REDIS_URL: str = "redis://medical_redis:6379"
 
-    # ─── MINIO (Object Storage) ───
-    MINIO_ENDPOINT: str = "medical_minio:9000"
+    # ─── MINIO (Object Storage - Fix Compliant Hostname) ───
+    MINIO_ENDPOINT: str = "medical-minio:9000"  # <── Diubah menggunakan tanda hubung agar sinkron dengan Compose
     MINIO_ACCESS_KEY: str = "minioadmin"
     MINIO_SECRET_KEY: str = "minioadmin"
     MINIO_BUCKET: str = "chat-attachments"
@@ -46,6 +47,16 @@ class Settings(BaseSettings):
 
     # ─── CORS ───
     CORS_ORIGINS: str = "*"  # Comma-separated, e.g. "http://localhost:3000,https://myapp.com"
+
+    # ─── AUTOMATIC ENDPOINT DESINFECTOR ───
+    @field_validator("MINIO_ENDPOINT", mode="before")
+    @classmethod
+    def clean_minio_endpoint(cls, v: str) -> str:
+        """Memastikan endpoint MinIO bersih dari prefix http:// atau https:// jika tidak sengaja terinput."""
+        if isinstance(v, str):
+            cleaned = v.replace("http://", "").replace("https://", "")
+            return cleaned.split("/")[0].strip()
+        return v
 
     class Config:
         env_file = ".env"

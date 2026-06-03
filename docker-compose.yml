@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════
-# Docker Compose - Medical AI Full Stack
+# Docker Compose - Medical AI Full Stack (Fix Hostname Version)
 # Services: Backend (FastAPI), Neo4j, Redis, MinIO
 # Supabase dijalankan sebagai managed service (cloud)
 # ═══════════════════════════════════════════════════════
@@ -28,15 +28,12 @@ services:
         condition: service_healthy
       medical_redis:
         condition: service_healthy
-      medical_minio:
+      medical-minio:                # <── Disesuaikan menggunakan tanda hubung
         condition: service_started
     networks:
       - medical_network
 
   # ── Neo4j Graph Database ──
-  # Username lokal HARUS "neo4j" (requirement Neo4j Docker).
-  # Credential cloud (NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD di .env)
-  # tetap dipakai oleh backend app untuk koneksi ke Neo4j Aura.
   medical_neo4j:
     image: neo4j:5.23-community
     container_name: medical_neo4j
@@ -79,10 +76,10 @@ services:
     networks:
       - medical_network
 
-  # ── MinIO (Object Storage for file uploads) ──
-  medical_minio:
+  # ── MinIO (Object Storage for file uploads - Fix Hostname) ──
+  medical-minio:                    # <── Diubah menjadi tanda hubung agar lolos validasi RFC Hostname
     image: minio/minio:latest
-    container_name: medical_minio
+    container_name: medical-minio   # <── Diubah menjadi tanda hubung
     restart: unless-stopped
     ports:
       - "9000:9000"     # API
