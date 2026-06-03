@@ -3,7 +3,7 @@ Multimodal File Processor - Ekstraksi teks dari file upload (PDF, Image, TXT).
 
 Modul ini bertanggung jawab untuk:
 - Membaca file PDF menggunakan PyMuPDF (fitz).
-- Melakukan OCR pada gambar menggunakan Tesseract (ind+eng).
+- Mengonversi gambar menjadi deskripsi kimia/medis analitis menggunakan Qwen2.5-VL-7B-Instruct.
 - Membaca file teks biasa (TXT/CSV).
 
 Hasil ekstraksi digunakan sebagai file_context dalam pipeline AI.
@@ -12,40 +12,15 @@ Hasil ekstraksi digunakan sebagai file_context dalam pipeline AI.
 import base64
 import io
 import logging
-import os
-from typing import Final
+from typing import Final, Optional
 
 import fitz  # PyMuPDF
-import pytesseract
-from huggingface_hub import InferenceClient
+import httpx
 from PIL import Image
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
-
-# ═══════════════════════════════════════════
-# VISION LLM CLIENT (Fallback untuk OCR kosong)
-# ═══════════════════════════════════════════
-_vision_client = InferenceClient(
-    provider="auto",
-    api_key=os.getenv("HF_API_TOKEN", ""),
-)
-
-# Model multimodal/vision untuk deskripsi gambar
-_VISION_MODEL = "meta-llama/Llama-3.2-11B-Vision-Instruct"
-
-# Prompt analitis untuk vision model
-_VISION_ANALYSIS_PROMPT = (
-    "Analyze this medical/chemical image closely. "
-    "Extract and write a comprehensive, factual textual description "
-    "of all molecular formulas, chemical compound graphs, medicinal plant "
-    "structures, diagnostic lab charts, or any text visible in this image. "
-    "Write the description in Indonesian (Bahasa Indonesia). "
-    "If you see a plant, describe its morphology, leaf shape, flower, "
-    "and any identifiable botanical features. "
-    "If you see chemical structures, describe the functional groups, "
-    "bonds, and molecular formula. "
-    "Be as detailed and factual as possible."
-)
 
 # ═══════════════════════════════════════════
 # KONSTANTA FILE PROCESSING
@@ -113,6 +88,90 @@ def validate_file_type(filename: str, content_type: str | None = None) -> str:
     return ext
 
 
+def encode_image_to_base64(file_bytes: bytes) -> str:
+    """
+    Membaca file gambar dan mengonversi ke base64 encoded string.
+
+    Args:
+        file_bytes: Bytes konten file gambar.
+
+    Returns:
+        Clean base64 string.
+    """
+    return base64.b64encode(file_bytes).decode("utf-8")
+
+
+def _describe_image_with_vision(file_bytes: bytes) -> dict[str, str]:
+    """
+    Mendeskripsikan konten visual gambar menggunakan Vision LLM Qwen2.5-VL-7B-Instruct.
+
+    Args:
+        file_bytes: Bytes konten file gambar.
+
+    Returns:
+        Dictionary dengan key 'extracted_text_content' berisi hasil deskripsi.
+    """
+    # Deteksi MIME type dari header bytes
+    mime_type = "image/jpeg"
+    if file_bytes[:8].startswith(b"\x89PNG"):
+        mime_type = "image/png"
+    elif file_bytes[:4].startswith(b"RIFF") and file_bytes[8:12] == b"WEBP":
+        mime_type = "image/webp"
+
+    try:
+        base64_image_string = encode_image_to_base64(file_bytes)
+
+        payload = {
+            "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Bertindaklah sebagai Ahli Laboratorium Farmasi dan Fitokimia. Analisis gambar senyawa aktif/tanaman herbal ini dengan sangat teliti. Tuliskan deskripsi lengkap berisi: 1. Nama senyawa kimia/nama latin tanaman yang terdeteksi, 2. Gugus fungsi atau rumus struktur yang terlihat, 3. Khasiat utamanya secara ilmiah. Tulis dalam Bahasa Indonesia yang padat dan langsung pada inti data tanpa basa-basi."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{mime_type};base64,{base64_image_string}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": 800
+        }
+
+        headers = {
+            "Authorization": f"Bearer {settings.HF_API_TOKEN}",
+            "Content-Type": "application/json"
+        }
+
+        url = "https://api-inference.huggingface.co/v1/chat/completions"
+
+        logger.info("Calling Qwen2.5-VL-7B-Instruct for image description...")
+        response = httpx.post(url, json=payload, headers=headers, timeout=60.0)
+        response.raise_for_status()
+
+        response_json = response.json()
+        generated_text = response_json["choices"][0]["message"]["content"]
+        return {"extracted_text_content": generated_text}
+
+    except Exception as e:
+        logger.warning(
+            f"Vision LLM description failed: {e}. "
+            "Falling back to default message.",
+            exc_info=True,
+        )
+        return {
+            "extracted_text_content": (
+                "Terdeteksi gambar lampiran struktur kimia/tanaman herbal, "
+                "namun Vision API sedang sibuk."
+            )
+        }
+
+
 def _extract_from_pdf(file_bytes: bytes) -> str:
     """
     Mengekstrak teks dari file PDF menggunakan PyMuPDF.
@@ -144,119 +203,16 @@ def _extract_from_pdf(file_bytes: bytes) -> str:
 
 def _extract_from_image(file_bytes: bytes) -> str:
     """
-    Mengekstrak teks dari gambar menggunakan Tesseract OCR.
-    Jika OCR menghasilkan < 10 karakter, otomatis fallback ke
-    Vision LLM untuk deskripsi visual analitis.
+    Mengekstrak deskripsi visual gambar menggunakan Vision LLM.
 
     Args:
         file_bytes: Bytes konten file gambar.
 
     Returns:
-        Teks yang diekstrak dari gambar via OCR atau deskripsi Vision LLM.
-
-    Raises:
-        RuntimeError: Jika OCR dan Vision fallback gagal.
+        Teks deskripsi visual hasil Vision LLM.
     """
-    try:
-        image = Image.open(io.BytesIO(file_bytes))
-        extracted_text: str = pytesseract.image_to_string(image, lang="ind+eng")
-
-        ocr_clean = extracted_text.strip()
-        logger.info(f"OCR extracted: {len(ocr_clean)} chars from image.")
-
-        # Jika OCR berhasil mengekstrak teks yang cukup, gunakan hasilnya
-        if len(ocr_clean) >= 10:
-            return extracted_text
-
-        # ── FALLBACK: Vision LLM Description ──
-        logger.warning(
-            f"OCR yielded only {len(ocr_clean)} chars (< 10). "
-            "Triggering Vision LLM fallback for image description."
-        )
-        vision_description = _describe_image_with_vision(file_bytes)
-        if vision_description and vision_description.strip():
-            return vision_description
-
-        # Jika Vision juga gagal, return apapun yang OCR hasilkan
-        logger.warning("Vision LLM fallback also produced no output. Using raw OCR result.")
-        return extracted_text
-
-    except Exception as e:
-        logger.error(f"Image extraction failed: {e}", exc_info=True)
-        raise RuntimeError(f"Gagal memproses gambar: {e}") from e
-
-
-def _describe_image_with_vision(file_bytes: bytes) -> str:
-    """
-    Mendeskripsikan konten visual gambar menggunakan Vision LLM (VLM).
-
-    Digunakan sebagai fallback ketika OCR menghasilkan teks kosong/minimal,
-    misalnya untuk gambar struktur kimia, diagram, atau foto tanaman obat
-    yang tidak mengandung teks tercetak.
-
-    Args:
-        file_bytes: Bytes konten file gambar.
-
-    Returns:
-        String deskripsi visual dalam Bahasa Indonesia.
-        Mengembalikan string kosong jika Vision LLM gagal.
-    """
-    api_key = os.getenv("HF_API_TOKEN", "")
-    if not api_key:
-        logger.warning("HF_API_TOKEN not set, cannot call Vision LLM.")
-        return ""
-
-    try:
-        # Encode gambar ke base64 data URI
-        b64_image = base64.b64encode(file_bytes).decode("utf-8")
-
-        # Deteksi MIME type dari header bytes
-        mime = "image/jpeg"
-        if file_bytes[:8].startswith(b"\x89PNG"):
-            mime = "image/png"
-        elif file_bytes[:4].startswith(b"RIFF") and file_bytes[8:12] == b"WEBP":
-            mime = "image/webp"
-
-        data_uri = f"data:{mime};base64,{b64_image}"
-
-        logger.info(
-            f"Calling Vision LLM ({_VISION_MODEL}) for image description "
-            f"({len(file_bytes)} bytes, {mime})..."
-        )
-
-        response = _vision_client.chat.completions.create(
-            model=_VISION_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": data_uri},
-                        },
-                        {
-                            "type": "text",
-                            "text": _VISION_ANALYSIS_PROMPT,
-                        },
-                    ],
-                }
-            ],
-            max_tokens=1024,
-        )
-
-        description = response.choices[0].message.content or ""
-        logger.info(
-            f"Vision LLM returned {len(description)} chars of image description."
-        )
-        return description.strip()
-
-    except Exception as e:
-        logger.error(
-            f"Vision LLM description failed: {e}. "
-            "Falling back to empty OCR result.",
-            exc_info=True,
-        )
-        return ""
+    result = _describe_image_with_vision(file_bytes)
+    return result["extracted_text_content"]
 
 
 def _extract_from_text(file_bytes: bytes) -> str:

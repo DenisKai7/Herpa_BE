@@ -5,7 +5,7 @@ Mengorkestrasi seluruh flow permintaan chat:
 1. Multimodal Interception: Jika ada file_context, sisipkan ke prompt.
 2. NLU Intent Routing: Klasifikasi query via SVM model.
 3. GraphRAG Retrieval: Hybrid search (vector + graph).
-4. Agentic Execution: LLM formatting atau Quiz Tool-Calling.
+4. Agentic Execution: LLM formatting atau Quiz Tool-Calling Agent.
 
 Mendukung dua mode:
 - Blocking (process_user_query): Response lengkap sekaligus.
@@ -45,7 +45,7 @@ def _preprocess_file_context(file_context: Optional[str]) -> Optional[str]:
 
     Melakukan:
     1. Validasi bahwa string tidak empty.
-    2. Truncate ke 4000 karakter untuk mencegah context window overflow.
+    2. Truncate ke 3000 karakter untuk mencegah context window overflow.
     3. Strip whitespace berlebih.
 
     Args:
@@ -60,14 +60,16 @@ def _preprocess_file_context(file_context: Optional[str]) -> Optional[str]:
     # Strip whitespace
     cleaned = file_context.strip()
 
-    # Defensive truncation — 3500 chars to leave room for directive text
+    # Defensive truncation — 3000 chars to leave room for directive text
     # that gets appended in llm_formatter (prevents context window overflow)
-    if len(cleaned) > 3500:
+    file_context_buffer = cleaned
+    if len(file_context_buffer) > 3000:
         logger.warning(
-            f"File context too long ({len(cleaned)} chars), "
-            f"truncating to 3500 chars to prevent LLM context overflow."
+            f"File context too long ({len(file_context_buffer)} chars), "
+            f"truncating to 3000 chars to prevent LLM context overflow."
         )
-        cleaned = cleaned[:3500]
+        file_context_buffer = file_context_buffer[:3000]
+    cleaned = file_context_buffer
 
     logger.info(
         f"File context preprocessed: {len(cleaned)} chars "
@@ -133,7 +135,7 @@ def _process_query_sync(
     )
 
     # ── CAPTURE UPLOADED FILE PAYLOAD DATA ──
-    # Validate, strip whitespace, and truncate to 4000 chars to prevent
+    # Validate, strip whitespace, and truncate to 3000 chars to prevent
     # 422 Unprocessable Entity crashes from context window overflow.
     file_data_content = _preprocess_file_context(file_context)
     if file_data_content:
@@ -170,7 +172,13 @@ def _process_query_sync(
             }
 
     # ── RAG INTENT: Retrieval + LLM Formatting ──
-    context_data = _retrieve_context(intent, query)
+    # Query Expansion Core
+    retreet_query = query
+    if file_data_content:
+        # Combine query with a snippet of the image text analysis to guide vector/graph matching
+        retreet_query = f"{query} {file_data_content.strip()}"
+
+    context_data = _retrieve_context(intent, retreet_query)
     final_response = generate_strict_response(
         query=query,
         context=context_data,
@@ -281,7 +289,11 @@ def _stream_query_sync(
         return
 
     # ── RAG + Streaming LLM ──
-    context_data = _retrieve_context(intent, query)
+    search_query = query
+    if file_data_content:
+        search_query = f"{query} {file_data_content.strip()}"
+
+    context_data = _retrieve_context(intent, search_query)
 
     full_response = ""
     try:

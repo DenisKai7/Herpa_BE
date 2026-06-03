@@ -254,7 +254,30 @@ def _build_system_prompt(
         intent, "Jawab pertanyaan berdasarkan data yang tersedia."
     )
 
-    system_message = f"""Anda adalah Asisten AI Farmasi & Edukasi untuk Ensiklopedia Tanaman Obat Indonesia.
+    file_context_buffer = file_context
+    if file_context_buffer and file_context_buffer.strip():
+        file_context_buffer = file_context_buffer[:3000]
+        system_message = f"""Anda adalah Asisten AI Farmasi & Edukasi untuk Ensiklopedia Tanaman Obat Indonesia.
+
+═══ INSTRUKSI MUTLAK (ZERO-HALLUCINATION) ═══
+1. HANYA gunakan informasi dari [DATA DATABASE] yang disediakan di bawah.
+2. DILARANG KERAS menggunakan pengetahuan bawaan/internal Anda.
+3. Jika data tidak tersedia, jawab: "Maaf, informasi ini belum tersedia dalam database kami."
+4. JANGAN mengarang data, angka, atau referensi yang tidak ada dalam konteks.
+5. Jika data parsial tersedia, jawab sejauh data yang ada dan nyatakan keterbatasannya.
+
+═══ INSTRUKSI INTENT: {intent.upper()} ═══
+{intent_instruction}"""
+
+        system_message += f"\n\n[DATA VISUAL GAMBAR DARI USER]\n{file_context_buffer.strip()}\n"
+        system_message += (
+            "\nPERINTAH MUTLAK MODEL 3B:\n"
+            "1. JANGAN gunakan salam pembuka seperti 'Hey there! Let's talk...'. Langsung jawab inti pertanyaan.\n"
+            "2. User bertanya tentang gambar senyawa/tanaman obat di atas. Gunakan [DATA VISUAL GAMBAR DARI USER] untuk mengidentifikasi nama senyawa kimia atau tanaman herbal tersebut secara langsung.\n"
+            "3. Jawab dalam 2-3 kalimat yang padat, jelas, dan valid. Pastikan semua tanda baca bold (**) ditutup sempurna sebelum menyelesaikan generasi teks."
+        )
+    else:
+        system_message = f"""Anda adalah Asisten AI Farmasi & Edukasi untuk Ensiklopedia Tanaman Obat Indonesia.
 
 ═══ IDENTITAS PERSONA: {ai_mode.upper()} ═══
 Target pengguna: {persona['greeting']} ({ai_mode})
@@ -278,17 +301,6 @@ Gaya bahasa: {persona['style']}
 - Struktur jawaban dengan heading, bullet points, dan penekanan yang tepat.
 - Ikuti struktur respons yang ditetapkan dalam Behavioral Blueprint di atas.
 - WAJIB: Pastikan setiap tag markdown dibuka DAN ditutup dengan benar (bold, heading, list)."""
-
-    file_context_text = file_context
-    if file_context_text:
-        file_context_text = file_context_text[:3500]
-        system_message += f"\n\n[CONTEXT ATTACHMENT IMAGE DATA]\n{file_context_text.strip()}\n"
-        system_message += (
-            "\nCRITICAL DIRECTIVE:\n"
-            "1. Skip standard greetings and intros. Look at the context attachment data above.\n"
-            "2. Answer the user's specific chemical/botanical questions cleanly and directly.\n"
-            "3. Ensure the text response is completely closed and contains no truncated markdown brackets."
-        )
 
     system_message += f"""
 
