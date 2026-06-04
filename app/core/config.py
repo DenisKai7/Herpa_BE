@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     # ─── HUGGINGFACE ───
     HF_API_TOKEN: str  # HuggingFace API token
 
+    # ─── GROQ VISION CLOUD ───
+    GROQ_API_TOKEN: str = ""
+
     # ─── LLM (via HuggingFace Inference API) ───
     LLM_BASE_URL: str = "https://router.huggingface.co/v1"
     LLM_MODEL: str = "meta-llama/Llama-3.2-3B-Instruct"

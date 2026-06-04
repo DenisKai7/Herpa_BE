@@ -10,7 +10,8 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import redis.asyncio as redis
-from fastapi import FastAPI
+# Tambahkan 'Request' dari fastapi untuk membaca context metadata HTTP
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi_limiter import FastAPILimiter
 
@@ -33,6 +34,29 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════
+# ADVANCED RATE LIMIT DEFENSIVE IDENTIFIER
+# ═══════════════════════════════════════════
+async def rate_limit_identifier(request: Request) -> str:
+    """
+    Fungsi pembuat key pembatas rate limit yang aman untuk rute publik maupun privat.
+    Mencegah error NoneType pada endpoint /login dengan melakukan fallback ke IP.
+    """
+    # 1. Coba deteksi jika user sudah terautentikasi melalui state middleware
+    user = getattr(request.state, "user", None)
+    if user and hasattr(user, "id") and user.id:
+        return f"user:{user.id}:{request.url.path}"
+    
+    # 2. DEFENSIVE FALLBACK: Jika rute publik/anonim (seperti /login), gunakan Alamat IP Client
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+    else:
+        client_ip = request.client.host if request.client else "unknown_ip"
+        
+    return f"ip:{client_ip}:{request.url.path}"
+
+
+# ═══════════════════════════════════════════
 # APPLICATION LIFESPAN (Startup & Shutdown)
 # ═══════════════════════════════════════════
 @asynccontextmanager
@@ -41,7 +65,7 @@ async def lifespan(app: FastAPI):
     Mengelola lifecycle aplikasi:
 
     Startup:
-    - Init Redis connection untuk rate limiter.
+    - Init Redis connection dengan Custom Identifier Rate Limiter.
     - Verify Neo4j graph database connectivity.
     - Ensure MinIO bucket exists untuk file uploads.
 
@@ -62,8 +86,9 @@ async def lifespan(app: FastAPI):
             encoding="utf-8",
             decode_responses=True,
         )
-        await FastAPILimiter.init(redis_connection)
-        logger.info("Redis Rate Limiter initialized successfully.")
+        # Registrasikan fungsi kustom identifier kita di sini agar Redis tidak menerima NoneType
+        await FastAPILimiter.init(redis_connection, identifier=rate_limit_identifier)
+        logger.info("Redis Rate Limiter initialized successfully with IP-Fallback Identifier.")
     except Exception as e:
         logger.warning(f"Redis connection failed (rate limiting disabled): {e}")
 
@@ -175,15 +200,6 @@ async def health_check() -> dict[str, str]:
 async def detailed_health_check() -> dict[str, Any]:
     """
     Detailed health check termasuk status koneksi ke semua services.
-
-    Memeriksa:
-    - Supabase (PostgreSQL + pgvector + Auth)
-    - Neo4j (Graph Database)
-    - Redis (Rate Limiting)
-    - MinIO (Object Storage)
-
-    Returns:
-        Dict dengan status overall dan per-service.
     """
     health: dict[str, Any] = {
         "status": "ok",

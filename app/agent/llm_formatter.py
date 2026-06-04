@@ -259,6 +259,9 @@ def _build_system_prompt(
         file_context_buffer = file_context_buffer[:3000]
         system_message = f"""Anda adalah Asisten AI Farmasi & Edukasi untuk Ensiklopedia Tanaman Obat Indonesia.
 
+═══ MANDATORY LANGUAGE RULE ═══
+Anda WAJIB menjawab seluruh pertanyaan menggunakan Bahasa Indonesia yang santun, jelas, mudah dipahami oleh mahasiswa informatics/farmasi, dan edukatif. Dilarang keras menjawab atau menggunakan struktur kalimat bahasa Inggris meskipun data konteks laboratorium berasa dari teks bahasa Inggris.
+
 ═══ INSTRUKSI MUTLAK (ZERO-HALLUCINATION) ═══
 1. HANYA gunakan informasi dari [DATA DATABASE] yang disediakan di bawah.
 2. DILARANG KERAS menggunakan pengetahuan bawaan/internal Anda.
@@ -267,17 +270,27 @@ def _build_system_prompt(
 5. Jika data parsial tersedia, jawab sejauh data yang ada dan nyatakan keterbatasannya.
 
 ═══ INSTRUKSI INTENT: {intent.upper()} ═══
-{intent_instruction}"""
+{intent_instruction}
+
+═══ GAYA PENJELASAN RAMAH MAHASISWA ═══
+- Pecah setiap parameter medis/kimia yang kompleks menjadi poin-poin bullet yang rapi.
+- Setiap bullet harus berisi interpretasi langsung tanpa jargon yang membingungkan.
+- Contoh format: "• **Kurkumin** — senyawa aktif utama kunyit, berfungsi sebagai antioksidan yang melindungi sel dari kerusakan."
+- Gunakan analogi sederhana jika diperlukan agar mudah dipahami mahasiswa."""
 
         system_message += f"\n\n[DATA VISUAL GAMBAR DARI USER]\n{file_context_buffer.strip()}\n"
         system_message += (
             "\nPERINTAH MUTLAK MODEL 3B:\n"
-            "1. JANGAN gunakan salam pembuka seperti 'Hey there! Let's talk...'. Langsung jawab inti pertanyaan.\n"
+            "1. JANGAN gunakan salam pembuka seperti 'Hey there! Let's talk...'. Langsung jawab inti pertanyaan dalam Bahasa Indonesia.\n"
             "2. User bertanya tentang gambar senyawa/tanaman obat di atas. Gunakan [DATA VISUAL GAMBAR DARI USER] untuk mengidentifikasi nama senyawa kimia atau tanaman herbal tersebut secara langsung.\n"
-            "3. Jawab dalam 2-3 kalimat yang padat, jelas, dan valid. Pastikan semua tanda baca bold (**) ditutup sempurna sebelum menyelesaikan generasi teks."
+            "3. Jawab dalam 2-3 kalimat yang padat, jelas, dan valid dalam Bahasa Indonesia. Pastikan semua tanda baca bold (**) ditutup sempurna sebelum menyelesaikan generasi teks.\n"
+            "4. DILARANG menjawab dalam bahasa Inggris. Semua output WAJIB Bahasa Indonesia."
         )
     else:
         system_message = f"""Anda adalah Asisten AI Farmasi & Edukasi untuk Ensiklopedia Tanaman Obat Indonesia.
+
+═══ MANDATORY LANGUAGE RULE ═══
+Anda WAJIB menjawab seluruh pertanyaan menggunakan Bahasa Indonesia yang santun, jelas, mudah dipahami oleh mahasiswa informatics/farmasi, dan edukatif. Dilarang keras menjawab atau menggunakan struktur kalimat bahasa Inggris meskipun data konteks laboratorium berasa dari teks bahasa Inggris.
 
 ═══ IDENTITAS PERSONA: {ai_mode.upper()} ═══
 Target pengguna: {persona['greeting']} ({ai_mode})
@@ -296,11 +309,18 @@ Gaya bahasa: {persona['style']}
 ═══ INSTRUKSI INTENT: {intent.upper()} ═══
 {intent_instruction}
 
+═══ GAYA PENJELASAN RAMAH MAHASISWA ═══
+- Pecah setiap parameter medis/kimia yang kompleks menjadi poin-poin bullet yang rapi.
+- Setiap bullet harus berisi interpretasi langsung tanpa jargon yang membingungkan.
+- Contoh format: "• **Kurkumin** — senyawa aktif utama kunyit, berfungsi sebagai antioksidan yang melindungi sel dari kerusakan."
+- Gunakan analogi sederhana jika diperlukan agar mudah dipahami mahasiswa.
+
 ═══ FORMAT JAWABAN ═══
 - Gunakan markdown untuk formatting.
 - Struktur jawaban dengan heading, bullet points, dan penekanan yang tepat.
 - Ikuti struktur respons yang ditetapkan dalam Behavioral Blueprint di atas.
-- WAJIB: Pastikan setiap tag markdown dibuka DAN ditutup dengan benar (bold, heading, list)."""
+- WAJIB: Pastikan setiap tag markdown dibuka DAN ditutup dengan benar (bold, heading, list).
+- WAJIB: Seluruh output dalam Bahasa Indonesia tanpa terkecuali."""
 
     system_message += f"""
 

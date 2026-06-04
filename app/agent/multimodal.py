@@ -3,7 +3,7 @@ Multimodal File Processor - Ekstraksi teks dari file upload (PDF, Image, TXT).
 
 Modul ini bertanggung jawab untuk:
 - Membaca file PDF menggunakan PyMuPDF (fitz).
-- Mengonversi gambar menjadi deskripsi kimia/medis analitis menggunakan Qwen2.5-VL-7B-Instruct.
+- Mengonversi gambar menjadi deskripsi kimia/medis analitis menggunakan Groq Vision API.
 - Membaca file teks biasa (TXT/CSV).
 
 Hasil ekstraksi digunakan sebagai file_context dalam pipeline AI.
@@ -12,6 +12,7 @@ Hasil ekstraksi digunakan sebagai file_context dalam pipeline AI.
 import base64
 import io
 import logging
+import os
 from typing import Final, Optional
 
 import fitz  # PyMuPDF
@@ -48,16 +49,6 @@ MAX_EXTRACTED_CHARS: Final[int] = 15_000
 def validate_file_type(filename: str, content_type: str | None = None) -> str:
     """
     Validasi tipe file berdasarkan ekstensi dan opsional MIME type.
-
-    Args:
-        filename: Nama file asli dari upload.
-        content_type: MIME type dari HTTP upload header (opsional).
-
-    Returns:
-        Ekstensi file yang tervalidasi (lowercase, tanpa titik).
-
-    Raises:
-        ValueError: Jika ekstensi atau MIME type tidak diizinkan.
     """
     if "." not in filename:
         raise ValueError(f"File '{filename}' tidak memiliki ekstensi.")
@@ -90,26 +81,17 @@ def validate_file_type(filename: str, content_type: str | None = None) -> str:
 
 def encode_image_to_base64(file_bytes: bytes) -> str:
     """
-    Membaca file gambar dan mengonversi ke base64 encoded string.
-
-    Args:
-        file_bytes: Bytes konten file gambar.
-
-    Returns:
-        Clean base64 string.
+    Membuat string Base64 yang bersih dari karakter whitespace tersembunyi
+    untuk mencegah eror 400 Bad Request pada API Gateway.
     """
-    return base64.b64encode(file_bytes).decode("utf-8")
+    base64_encoded = base64.b64encode(file_bytes).decode("utf-8")
+    return base64_encoded.replace("\n", "").replace("\r", "").strip()
 
 
 def _describe_image_with_vision(file_bytes: bytes) -> dict[str, str]:
     """
-    Mendeskripsikan konten visual gambar menggunakan Vision LLM Qwen2.5-VL-7B-Instruct.
-
-    Args:
-        file_bytes: Bytes konten file gambar.
-
-    Returns:
-        Dictionary dengan key 'extracted_text_content' berisi hasil deskripsi.
+    Mendeskripsikan konten visual gambar menggunakan Groq Cloud API
+    dengan model llama-3.2-11b-vision-preview.
     """
     # Deteksi MIME type dari header bytes
     mime_type = "image/jpeg"
@@ -119,17 +101,30 @@ def _describe_image_with_vision(file_bytes: bytes) -> dict[str, str]:
         mime_type = "image/webp"
 
     try:
+        # Enkripsi ke Base64 string yang steril tanpa newline characters
         base64_image_string = encode_image_to_base64(file_bytes)
 
+        # Instruksi prompt fitokimia ketat dengan pembagian struktural molekul
+        prompt_instruction = (
+            "Bertindaklah sebagai Ahli Spektroskopi dan Laboratorium Fitokimia. Analisis gambar struktur kimia ini dengan presisi tinggi.\n"
+            "Perhatikan ciri utama ini untuk mencegah salah tebak:\n"
+            "1. Cek Cincin Aromatik Benzena: Jika memiliki DUA cincin benzena simetris di ujung kiri dan kanan dengan gugus -OH dan -OCH3, ini adalah KURKUMIN / KURKUMINOID (Kunyit).\n"
+            "2. Cek Cincin Tunggal Fenolik: Jika hanya memiliki SATU cincin benzena fenolik (gugus -OH) yang terikat pada rantai hidrokarbon tidak jenuh seskuiterpenoid (rantai karbon dengan ikatan rangkap dua alkena), ini adalah XANTHORRHIZOL (Temulawak).\n"
+            "3. Cek Asimetris Gugus Alkil: Jika hanya memiliki SATU cincin aromatik benzena dengan rantai hidrokarbon lurus panjang yang mengandung gugus hidroksil dan keton jenuh, ini adalah GINGEROL (Jahe).\n\n"
+            "Tulis deskripsi ringkas dalam Bahasa Indonesia yang edukatif untuk mahasiswa farmasi/informatika.\n\n"
+            "CRITICAL REQUIREMENT: Di baris paling akhir dari jawaban Anda, Anda WAJIB menuliskan satu baris penutup dengan format kaku:\n"
+            "[TARGET: Nama_Senyawa_Murni]"
+        )
+
         payload = {
-            "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+            "model": "llama-3.2-11b-vision-preview",
             "messages": [
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text",
-                            "text": "Bertindaklah sebagai Ahli Laboratorium Farmasi dan Fitokimia. Analisis gambar senyawa aktif/tanaman herbal ini dengan sangat teliti. Tuliskan deskripsi lengkap berisi: 1. Nama senyawa kimia/nama latin tanaman yang terdeteksi, 2. Gugus fungsi atau rumus struktur yang terlihat, 3. Khasiat utamanya secara ilmiah. Tulis dalam Bahasa Indonesia yang padat dan langsung pada inti data tanpa basa-basi."
+                            "text": prompt_instruction
                         },
                         {
                             "type": "image_url",
@@ -140,34 +135,40 @@ def _describe_image_with_vision(file_bytes: bytes) -> dict[str, str]:
                     ]
                 }
             ],
+            "temperature": 0.0,
             "max_tokens": 800
         }
 
         headers = {
-            "Authorization": f"Bearer {settings.HF_API_TOKEN}",
+            "Authorization": f"Bearer {settings.GROQ_API_TOKEN or settings.HF_API_TOKEN}",
             "Content-Type": "application/json"
         }
 
-        url = "https://api-inference.huggingface.co/v1/chat/completions"
+        url = "https://api.groq.com/openai/v1/chat/completions"
 
-        logger.info("Calling Qwen2.5-VL-7B-Instruct for image description...")
+        logger.info("Calling Groq llama-3.2-11b-vision-preview with sanitized base64 sequence...")
         response = httpx.post(url, json=payload, headers=headers, timeout=60.0)
-        response.raise_for_status()
+        
+        # Jika server menolak, tangkap isi teks penolakan aslinya untuk log terminal
+        if response.status_code != 200:
+            logger.error(f"Groq Cloud gateway rejected request. Error payload: {response.text}")
+            response.raise_for_status()
 
         response_json = response.json()
         generated_text = response_json["choices"][0]["message"]["content"]
         return {"extracted_text_content": generated_text}
 
     except Exception as e:
-        logger.warning(
-            f"Vision LLM description failed: {e}. "
-            "Falling back to default message.",
-            exc_info=True,
-        )
+        logger.warning(f"Vision LLM description failed: {e}", exc_info=True)
+        error_detail = f" (Details: {str(e)})"
+        if 'response' in locals() and hasattr(response, 'text'):
+            error_detail += f" | Server Response: {response.text}"
+
+        # Proteksi Fallback Bersih: Gagalkan tag target agar pencarian grafik tahu objek tidak terbaca
         return {
             "extracted_text_content": (
-                "Terdeteksi gambar lampiran struktur kimia/tanaman herbal, "
-                "namun Vision API sedang sibuk."
+                f"[TARGET: Unknown] Terdeteksi lampiran gambar berkas struktur kimia, "
+                f"namun sistem pemrosesan visual sedang sibuk.{error_detail}"
             )
         }
 
@@ -175,15 +176,6 @@ def _describe_image_with_vision(file_bytes: bytes) -> dict[str, str]:
 def _extract_from_pdf(file_bytes: bytes) -> str:
     """
     Mengekstrak teks dari file PDF menggunakan PyMuPDF.
-
-    Args:
-        file_bytes: Bytes konten file PDF.
-
-    Returns:
-        Teks yang diekstrak dari seluruh halaman PDF.
-
-    Raises:
-        RuntimeError: Jika PDF tidak bisa dibuka atau corrupt.
     """
     try:
         pdf_document = fitz.open(stream=file_bytes, filetype="pdf")
@@ -204,12 +196,6 @@ def _extract_from_pdf(file_bytes: bytes) -> str:
 def _extract_from_image(file_bytes: bytes) -> str:
     """
     Mengekstrak deskripsi visual gambar menggunakan Vision LLM.
-
-    Args:
-        file_bytes: Bytes konten file gambar.
-
-    Returns:
-        Teks deskripsi visual hasil Vision LLM.
     """
     result = _describe_image_with_vision(file_bytes)
     return result["extracted_text_content"]
@@ -218,15 +204,6 @@ def _extract_from_image(file_bytes: bytes) -> str:
 def _extract_from_text(file_bytes: bytes) -> str:
     """
     Membaca konten file teks biasa.
-
-    Args:
-        file_bytes: Bytes konten file teks (UTF-8).
-
-    Returns:
-        String konten file.
-
-    Raises:
-        RuntimeError: Jika file tidak bisa di-decode.
     """
     try:
         return file_bytes.decode("utf-8")
@@ -245,24 +222,6 @@ def extract_text_from_file(
 ) -> str:
     """
     Entry point utama: ekstrak teks dari file berdasarkan tipe.
-
-    Pipeline:
-    1. Validasi ekstensi dan MIME type.
-    2. Route ke extractor yang sesuai (PDF/Image/Text).
-    3. Bersihkan whitespace berlebih.
-    4. Truncate jika melebihi batas karakter.
-
-    Args:
-        file_bytes: Bytes konten file yang diupload.
-        filename: Nama file asli dari user.
-        content_type: MIME type dari upload HTTP header.
-
-    Returns:
-        Teks yang diekstrak dan dibersihkan, siap dipakai sebagai konteks AI.
-
-    Raises:
-        ValueError: Jika tipe file tidak didukung.
-        RuntimeError: Jika proses ekstraksi gagal.
     """
     ext = validate_file_type(filename, content_type)
 
@@ -275,7 +234,6 @@ def extract_text_from_file(
     elif ext in TEXT_EXTENSIONS:
         raw_text = _extract_from_text(file_bytes)
     else:
-        # Seharusnya tidak tercapai karena sudah divalidasi di atas
         raise ValueError(f"Format file '.{ext}' tidak didukung oleh sistem.")
 
     # Bersihkan whitespace berlebih

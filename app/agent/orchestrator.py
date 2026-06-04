@@ -172,13 +172,18 @@ def _process_query_sync(
             }
 
     # ── RAG INTENT: Retrieval + LLM Formatting ──
-    # Query Expansion Core
-    retreet_query = query
+    search_query = query
     if file_data_content:
-        # Combine query with a snippet of the image text analysis to guide vector/graph matching
-        retreet_query = f"{query} {file_data_content.strip()}"
+        # Combine user question with the factual vision analysis text from Groq
+        search_query = f"{query} {file_data_content.strip()}"
 
-    context_data = _retrieve_context(intent, retreet_query)
+    context_data = _retrieve_context(intent, search_query)
+
+    # Strict RAG Guardrail Bypass Layer
+    if (not context_data or context_data.strip() == "" or "0 records found" in context_data) and file_data_content:
+        logger.info("Graph search was empty but file context exists. Feeding vision data into context_data to bypass strict RAG constraints.")
+        context_data = f"Data Hasil Analisis Gambar/Berkas Laboratorium: {file_data_content}"
+
     final_response = generate_strict_response(
         query=query,
         context=context_data,
@@ -294,6 +299,11 @@ def _stream_query_sync(
         search_query = f"{query} {file_data_content.strip()}"
 
     context_data = _retrieve_context(intent, search_query)
+
+    # Strict RAG Guardrail Bypass Layer for Stream
+    if (not context_data or context_data.strip() == "" or "0 records found" in context_data) and file_data_content:
+        logger.info("[Stream] Graph search empty, bypassing strict RAG constraint via vision data injection.")
+        context_data = f"Data Hasil Analisis Gambar/Berkas Laboratorium: {file_data_content}"
 
     full_response = ""
     try:

@@ -10,11 +10,12 @@ Menggabungkan dua paradigma pencarian:
 Setiap intent memiliki retriever khusus:
 - konsultasi: tanaman obat berdasarkan gejala + relasi compound/drug.
 - ensiklopedia: informasi detail tanaman + taksonomi/botani.
-- edukasi: materi edukasi + relasi antar konsep.
+- edukasi: materi edukasi + relasi antar konsep dengan proteksi multi-label.
 """
 
 import logging
-from typing import Any
+import re
+from typing import Any, Optional
 
 from app.core.database import neo4j_driver, supabase
 from app.core.embedding import embed_text
@@ -39,15 +40,6 @@ def _vector_search(
     - query_embedding: vector(768)
     - match_count: int
     - match_threshold: float
-
-    Args:
-        query: Teks query pengguna.
-        table: Nama tabel target (untuk logging).
-        match_function: Nama RPC function di Supabase (e.g., 'match_plants').
-        limit: Jumlah hasil maksimal.
-
-    Returns:
-        List of dict: Hasil pencarian yang relevan.
     """
     try:
         query_embedding = embed_text(query)
@@ -78,29 +70,17 @@ def _vector_search(
 # HELPER: GRAPH SEARCH (Neo4j Cypher)
 # ═══════════════════════════════════════════
 
-def _graph_search(query: str, cypher_query: str) -> list[dict[str, Any]]:
+def _graph_search(query: str, cypher_query: str, **kwargs: Any) -> list[dict[str, Any]]:
     """
     Menjalankan Cypher query di Neo4j untuk mendapatkan relasi antar entitas.
-
-    Menggunakan driver.execute_query() yang memiliki built-in auto-retry
-    untuk koneksi defunct/expired (SessionExpired, ServiceUnavailable).
-
-    Graph model yang diharapkan:
-    (:Herb)-[:HAS_COMPOUND]->(:Compound)
-    (:Herb)-[:USED_FOR]->(:TherapeuticUse)
-    (:Compound)-[:INTERACTS_WITH]->(:Drug)
-
-    Args:
-        query: Parameter $query untuk Cypher query.
-        cypher_query: String Cypher query yang akan dijalankan.
-
-    Returns:
-        List of dict: Record hasil Cypher query. Empty list on failure.
+    Menggunakan driver.execute_query() dengan built-in auto-retry untuk koneksi defunct.
     """
     try:
+        params = {"query": query}
+        params.update(kwargs)
         records, _, _ = neo4j_driver.execute_query(
             cypher_query,
-            parameters_={"query": query},
+            parameters_=params,
         )
         result = [record.data() for record in records]
         logger.info(f"Graph search: {len(result)} records found.")
@@ -119,16 +99,6 @@ def _format_records_to_text(
 ) -> str:
     """
     Mengubah list of dict menjadi teks terstruktur untuk dikirim ke LLM.
-
-    Memfilter field yang tidak relevan (embedding, id) dan memformat
-    setiap record menjadi key-value pairs yang mudah dibaca.
-
-    Args:
-        records: List of dict dari hasil pencarian.
-        source_label: Label sumber untuk header teks.
-
-    Returns:
-        String terformat untuk konteks LLM.
     """
     if not records:
         return f"[{source_label}]: Tidak ada data ditemukan."
@@ -146,35 +116,39 @@ def _format_records_to_text(
 
 # ═══════════════════════════════════════════
 # INTENT: KONSULTASI (Content-Based Recommendation)
-# Mencari tanaman/herbal berdasarkan gejala/keluhan
 # ═══════════════════════════════════════════
 
 def content_based_recommendation(query: str, limit: int = 5) -> str:
     """
-    Hybrid search untuk intent 'konsultasi'.
-
-    Pipeline:
-    1. Vector search: Cari tanaman yang secara semantik relevan dengan gejala.
-    2. Graph search: Temukan relasi tambahan (compound, interaksi obat).
-
-    Args:
-        query: Deskripsi gejala/keluhan dari pengguna.
-        limit: Jumlah hasil maksimal dari vector search.
-
-    Returns:
-        String konteks gabungan dari vector + graph search.
+    Hybrid search untuk intent 'konsultasi' dengan pencarian gejala dan multi-label.
     """
-    # ── STEP 1: Vector Search (Supabase pgvector) ──
+    # ── STEP 1: Vector Search ──
     vector_results = _vector_search(query, "plants", "match_plants", limit)
     vector_text = _format_records_to_text(
         vector_results, "Pencarian Semantik Tanaman Obat"
     )
 
-    # ── STEP 2: Graph Search (Neo4j) ──
+    # ── STEP 2: Graph Search ──
+    # Strict Tag Isolation Layer
+    tag_match = re.search(r'\[target:\s*([^\]]+)\]', query.lower() if query else "")
+    if tag_match:
+        # Clean any potential spaces or underscores
+        exact_compound = tag_match.group(1).strip()
+        cleaned_words = [exact_compound]
+        logger.info(f"[Retriever Strict Match] Isolated visual target compound: {cleaned_words}")
+    else:
+        # Standard text chat fallback tokenization
+        cleaned_words = list(set(re.findall(r'\b\w{4,}\b', query.lower() if query else "")))
+        if not cleaned_words:
+            cleaned_words = [query.lower()] if query else [""]
+
     cypher = """
-    MATCH (p:Plant)-[:TREATS]->(s:Symptom)
-    WHERE toLower(s.name) CONTAINS toLower($query)
-       OR toLower(p.name) CONTAINS toLower($query)
+    MATCH (p)-[:TREATS]->(s:Symptom)
+    WHERE (p:Plant OR p:Herb)
+      AND (any(w IN $words WHERE toLower(s.name) CONTAINS w OR w CONTAINS toLower(s.name))
+       OR any(w IN $words WHERE toLower(p.name) CONTAINS w OR w CONTAINS toLower(p.name))
+       OR toLower(s.name) CONTAINS toLower($query)
+       OR toLower(p.name) CONTAINS toLower($query))
     OPTIONAL MATCH (p)-[:HAS_COMPOUND]->(c:Compound)
     OPTIONAL MATCH (c)-[:INTERACTS_WITH]->(d:Drug)
     RETURN p.name AS tanaman, p.nama_latin AS nama_latin,
@@ -183,7 +157,7 @@ def content_based_recommendation(query: str, limit: int = 5) -> str:
            collect(DISTINCT d.name) AS interaksi_obat
     LIMIT 5
     """
-    graph_results = _graph_search(query, cypher)
+    graph_results = _graph_search(query, cypher, words=cleaned_words)
     graph_text = _format_records_to_text(
         graph_results, "Relasi Graph Tanaman-Gejala-Senyawa"
     )
@@ -193,23 +167,11 @@ def content_based_recommendation(query: str, limit: int = 5) -> str:
 
 # ═══════════════════════════════════════════
 # INTENT: ENSIKLOPEDIA (Encyclopedia Search)
-# Mencari informasi detail tentang tanaman/senyawa tertentu
 # ═══════════════════════════════════════════
 
 def search_encyclopedia(query: str, limit: int = 5) -> str:
     """
-    Hybrid search untuk intent 'ensiklopedia'.
-
-    Pipeline:
-    1. Vector search: Cari entri ensiklopedia yang paling relevan.
-    2. Graph search: Temukan klasifikasi taksonomi dan relasi botani.
-
-    Args:
-        query: Kata kunci pencarian ensiklopedia.
-        limit: Jumlah hasil maksimal dari vector search.
-
-    Returns:
-        String konteks gabungan dari vector + graph search.
+    Hybrid search untuk intent 'ensiklopedia' dengan proteksi multi-label.
     """
     # ── STEP 1: Vector Search ──
     vector_results = _vector_search(
@@ -218,10 +180,17 @@ def search_encyclopedia(query: str, limit: int = 5) -> str:
     vector_text = _format_records_to_text(vector_results, "Pencarian Ensiklopedia")
 
     # ── STEP 2: Graph Search ──
+    cleaned_words = list(set(re.findall(r'\b\w{4,}\b', query.lower() if query else "")))
+    if not cleaned_words:
+        cleaned_words = [query.lower()] if query else [""]
+
     cypher = """
-    MATCH (p:Plant)
-    WHERE toLower(p.name) CONTAINS toLower($query)
-       OR toLower(p.nama_latin) CONTAINS toLower($query)
+    MATCH (p)
+    WHERE (p:Plant OR p:Herb)
+      AND (any(w IN $words WHERE toLower(p.name) CONTAINS w OR w CONTAINS toLower(p.name))
+       OR any(w IN $words WHERE toLower(p.nama_latin) CONTAINS w OR w CONTAINS toLower(p.nama_latin))
+       OR toLower(p.name) CONTAINS toLower($query)
+       OR toLower(p.nama_latin) CONTAINS toLower($query))
     OPTIONAL MATCH (p)-[:BELONGS_TO]->(f:Family)
     OPTIONAL MATCH (p)-[:HAS_COMPOUND]->(c:Compound)
     OPTIONAL MATCH (p)-[:FOUND_IN]->(r:Region)
@@ -232,7 +201,7 @@ def search_encyclopedia(query: str, limit: int = 5) -> str:
            collect(DISTINCT r.name) AS daerah_asal
     LIMIT 5
     """
-    graph_results = _graph_search(query, cypher)
+    graph_results = _graph_search(query, cypher, words=cleaned_words)
     graph_text = _format_records_to_text(
         graph_results, "Relasi Graph Ensiklopedia"
     )
@@ -242,25 +211,15 @@ def search_encyclopedia(query: str, limit: int = 5) -> str:
 
 # ═══════════════════════════════════════════
 # INTENT: EDUKASI (Education Corpus Retrieval)
-# Mencari materi edukasi kimia/farmasi/biologi
 # ═══════════════════════════════════════════
 
 def retrieve_education_corpus(query: str, limit: int = 5) -> str:
     """
     Hybrid search untuk intent 'edukasi'.
-
-    Pipeline:
-    1. Vector search: Cari materi edukasi yang paling relevan.
-    2. Graph search: Cari relasi konsep kimia/biologi.
-
-    Args:
-        query: Topik atau pertanyaan edukasi.
-        limit: Jumlah hasil maksimal dari vector search.
-
-    Returns:
-        String konteks gabungan dari vector + graph search.
+    Mencari secara independen dari sisi Tanaman (Herb) maupun Senyawa (Compound)
+    untuk menghindari bottleneck pencarian multimodal RAG.
     """
-    # ── STEP 1: Vector Search ──
+    # ── STEP 1: Vector Search (Supabase pgvector) ──
     vector_results = _vector_search(
         query, "education_materials", "match_education", limit
     )
@@ -268,18 +227,58 @@ def retrieve_education_corpus(query: str, limit: int = 5) -> str:
         vector_results, "Pencarian Materi Edukasi"
     )
 
-    # ── STEP 2: Graph Search ──
+    # ── STEP 2: Graph Search (Neo4j Independent Dual-Path Match) ──
+    # Strict Tag Isolation Layer
+    tag_match = re.search(r'\[target:\s*([^\]]+)\]', query.lower() if query else "")
+    if tag_match:
+        # Clean any potential spaces or underscores
+        exact_compound = tag_match.group(1).strip()
+        cleaned_words = [exact_compound]
+        logger.info(f"[Retriever Strict Match] Isolated visual target compound: {cleaned_words}")
+    else:
+        # Standard text chat fallback tokenization
+        cleaned_words = list(set(re.findall(r'\b\w{4,}\b', query.lower() if query else "")))
+        if not cleaned_words:
+            cleaned_words = [query.lower()] if query else [""]
+
+    # Kueri Utama: Jalur pencarian mandiri (Herb dan Compound dipisah)
     cypher = """
-    MATCH (h:Herb)
-    WHERE toLower(h.name) CONTAINS toLower($query)
-    OPTIONAL MATCH (h)-[:HAS_COMPOUND]->(c:Compound)
-    OPTIONAL MATCH (h)-[:USED_FOR]->(t:TherapeuticUse)
-    RETURN h.name AS topik, h.name AS deskripsi,
-           collect(DISTINCT c.name) AS konsep_kunci,
-           collect(DISTINCT t.name) AS topik_terkait
+    // Jalur 1: Cari Herb langsung jika kata kunci cocok dengan nama tanaman
+    OPTIONAL MATCH (h:Herb)
+    WHERE any(w IN $words WHERE toLower(h.name) CONTAINS w OR w CONTAINS toLower(h.name))
+
+    // Jalur 2: Cari Compound jika kata kunci cocok dengan nama senyawa gambar (e.g. Curcumin)
+    OPTIONAL MATCH (c:Compound)
+    WHERE any(w IN $words WHERE toLower(c.name) CONTAINS w OR w CONTAINS toLower(c.name))
+    // Hubungkan senyawa yang cocok ke node Herb induknya
+    OPTIONAL MATCH (h2:Herb)-[:HAS_COMPOUND]->(c)
+
+    // Gabungkan hasil tanaman dari Jalur 1 dan Jalur 2 secara aman
+    WITH collect(DISTINCT h) + collect(DISTINCT h2) AS merged_herbs
+    UNWIND merged_herbs AS final_herb
+    WITH DISTINCT final_herb WHERE final_herb IS NOT NULL
+
+    // Ambil seluruh daftar senyawa aktif dari tanaman yang terpilih untuk konteks LLM
+    OPTIONAL MATCH (final_herb)-[:HAS_COMPOUND]->(comp:Compound)
+    RETURN final_herb.name AS topik, final_herb.name AS deskripsi,
+           collect(DISTINCT comp.name) AS konsep_kunci
     LIMIT 5
     """
-    graph_results = _graph_search(query, cypher)
+    graph_results = _graph_search(query, cypher, words=cleaned_words)
+
+    # Fallback Kueri: Jika jalur independen kosong, gunakan pencarian string pencocokan jarak longgar
+    if not graph_results:
+        logger.info("[Retriever Fallback] Dual-path graph search returned 0 rows. Retrying with loose text matching.")
+        fallback_cypher = """
+        MATCH (h:Herb)
+        WHERE toLower(h.name) CONTAINS toLower($query) OR toLower($query) CONTAINS toLower(h.name)
+        OPTIONAL MATCH (h)-[:HAS_COMPOUND]->(c:Compound)
+        RETURN h.name AS topik, h.name AS deskripsi,
+               collect(DISTINCT c.name) AS konsep_kunci
+        LIMIT 5
+        """
+        graph_results = _graph_search(query, fallback_cypher)
+        
     graph_text = _format_records_to_text(
         graph_results, "Relasi Graph Topik Edukasi"
     )
