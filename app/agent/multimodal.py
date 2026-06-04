@@ -91,7 +91,7 @@ def encode_image_to_base64(file_bytes: bytes) -> str:
 def _describe_image_with_vision(file_bytes: bytes) -> dict[str, str]:
     """
     Mendeskripsikan konten visual gambar menggunakan Groq Cloud API
-    dengan model llama-3.2-11b-vision-preview.
+    dengan model llama-3.2-11b-vision-instruct.
     """
     # Deteksi MIME type dari header bytes
     mime_type = "image/jpeg"
@@ -117,7 +117,7 @@ def _describe_image_with_vision(file_bytes: bytes) -> dict[str, str]:
         )
 
         payload = {
-            "model": "llama-3.2-11b-vision-preview",
+            "model": "llama-3.2-11b-vision-instruct",
             "messages": [
                 {
                     "role": "user",
@@ -146,7 +146,7 @@ def _describe_image_with_vision(file_bytes: bytes) -> dict[str, str]:
 
         url = "https://api.groq.com/openai/v1/chat/completions"
 
-        logger.info("Calling Groq llama-3.2-11b-vision-preview with sanitized base64 sequence...")
+        logger.info("Calling Groq llama-3.2-11b-vision-instruct with sanitized base64 sequence...")
         response = httpx.post(url, json=payload, headers=headers, timeout=60.0)
         
         # Jika server menolak, tangkap isi teks penolakan aslinya untuk log terminal

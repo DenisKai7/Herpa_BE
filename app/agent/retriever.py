@@ -180,9 +180,18 @@ def search_encyclopedia(query: str, limit: int = 5) -> str:
     vector_text = _format_records_to_text(vector_results, "Pencarian Ensiklopedia")
 
     # ── STEP 2: Graph Search ──
-    cleaned_words = list(set(re.findall(r'\b\w{4,}\b', query.lower() if query else "")))
-    if not cleaned_words:
-        cleaned_words = [query.lower()] if query else [""]
+    # Strict Tag Isolation Layer
+    tag_match = re.search(r'\[target:\s*([^\]]+)\]', query.lower() if query else "")
+    if tag_match:
+        # Clean any potential spaces or underscores
+        exact_compound = tag_match.group(1).strip()
+        cleaned_words = [exact_compound]
+        logger.info(f"[Retriever Strict Match] Isolated visual target compound: {cleaned_words}")
+    else:
+        # Standard text chat fallback tokenization
+        cleaned_words = list(set(re.findall(r'\b\w{4,}\b', query.lower() if query else "")))
+        if not cleaned_words:
+            cleaned_words = [query.lower()] if query else [""]
 
     cypher = """
     MATCH (p)

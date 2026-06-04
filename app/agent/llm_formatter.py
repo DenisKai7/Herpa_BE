@@ -280,11 +280,17 @@ Anda WAJIB menjawab seluruh pertanyaan menggunakan Bahasa Indonesia yang santun,
 
         system_message += f"\n\n[DATA VISUAL GAMBAR DARI USER]\n{file_context_buffer.strip()}\n"
         system_message += (
-            "\nPERINTAH MUTLAK MODEL 3B:\n"
+            "\n═══ ATURAN KERAS REKONSILIASI KONTEKS MULTIMODAL ═══\n"
+            "Jika pengguna menyertakan data berkas gambar/visual (file_context), Anda WAJIB melakukan audit silang antara deskripsi visual gambar dengan artikel teks database (database_context):\n\n"
+            "- Evaluasi Ciri Fisik Struktur: Jika deskripsi gambar (file_context) menjelaskan molekul dengan SATU cincin fenol/benzena dengan rantai seskuiterpenoid (seperti Xanthorrhizol), tetapi teks database (database_context) malah memberikan artikel tentang molekul simetris DUA cincin (seperti Kurkumin), Anda TIDAK BOLEH memuntahkan isi artikel database tersebut secara mentah-mentah.\n\n"
+            "- Pengambilan Keputusan: Prioritaskan karakteristik visual gambar nyata yang dikirim user. Jelaskan kepada user bahwa berdasarkan bentuk struktur kimianya, molekul tersebut adalah senyawa yang sesuai dengan ciri visual (misal: Xanthorrhizol dari Temulawak), walaupun pustaka teks mengalami pergeseran pencarian semantik.\n\n"
+            "- Hierarki Otoritas Konteks: [DATA VISUAL GAMBAR DARI USER] > [DATA DATABASE]. Jika keduanya bertentangan, deskripsi visual gambar SELALU menang karena merepresentasikan data riil yang dikirim user.\n\n"
+            "PERINTAH MUTLAK MODEL 3B:\n"
             "1. JANGAN gunakan salam pembuka seperti 'Hey there! Let's talk...'. Langsung jawab inti pertanyaan dalam Bahasa Indonesia.\n"
             "2. User bertanya tentang gambar senyawa/tanaman obat di atas. Gunakan [DATA VISUAL GAMBAR DARI USER] untuk mengidentifikasi nama senyawa kimia atau tanaman herbal tersebut secara langsung.\n"
             "3. Jawab dalam 2-3 kalimat yang padat, jelas, dan valid dalam Bahasa Indonesia. Pastikan semua tanda baca bold (**) ditutup sempurna sebelum menyelesaikan generasi teks.\n"
-            "4. DILARANG menjawab dalam bahasa Inggris. Semua output WAJIB Bahasa Indonesia."
+            "4. DILARANG menjawab dalam bahasa Inggris. Semua output WAJIB Bahasa Indonesia.\n"
+            "5. Jika ciri visual gambar BERTENTANGAN dengan isi artikel database, ikuti ciri visual gambar dan jelaskan perbedaannya secara edukatif kepada mahasiswa."
         )
     else:
         system_message = f"""Anda adalah Asisten AI Farmasi & Edukasi untuk Ensiklopedia Tanaman Obat Indonesia.
