@@ -11,13 +11,15 @@ dilindungi oleh JWT authentication.
 """
 
 import asyncio
+import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.agent.llm_formatter import generate_strict_response
+from app.agent.llm_formatter import generate_strict_response, generate_structured_recommendation
 from app.agent.retriever import content_based_recommendation, search_encyclopedia
 from app.core.dependencies import verify_user
 from app.models.schemas import RecommendationRequest, SearchRequest
@@ -38,18 +40,30 @@ def _recommend_sync(gejala: str, limit: int) -> dict[str, Any]:
         limit: Jumlah hasil rekomendasi.
 
     Returns:
-        Dict berisi gejala dan recommendation text.
+        Dict berisi gejala dan list of structured recommendations.
     """
     context = content_based_recommendation(gejala, limit)
-    recommendation = generate_strict_response(
+    raw_response = generate_structured_recommendation(
         query=gejala,
         context=context,
-        ai_mode="Umum",
-        intent="konsultasi",
     )
+
+    # Robust JSON parser
+    recommendations_list = []
+    try:
+        cleaned_content = raw_response
+        if "```" in cleaned_content:
+            match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned_content)
+            if match:
+                cleaned_content = match.group(1)
+        recommendations_list = json.loads(cleaned_content.strip())
+    except Exception as e:
+        logger.error(f"Failed to parse structured recommendations JSON: {e}. Raw content: {raw_response}")
+        recommendations_list = []
+
     return {
         "gejala": gejala,
-        "recommendation": recommendation,
+        "recommendations": recommendations_list,
     }
 
 

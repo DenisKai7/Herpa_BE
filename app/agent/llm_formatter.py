@@ -445,3 +445,57 @@ def generate_streaming_response(
     except Exception as e:
         logger.error(f"HuggingFace LLM streaming error: {e}", exc_info=True)
         yield f"[Error: {type(e).__name__}]"
+
+
+def generate_structured_recommendation(
+    query: str,
+    context: str,
+) -> str:
+    """
+    Menghasilkan rekomendasi herbal dalam format JSON list yang valid secara terstruktur.
+    Menggunakan model medis tingkat tinggi (settings.MODEL_MEDIS_2) secara paksa.
+    """
+    system_prompt = f"""Anda adalah Sistem AI Asisten Klinis dan Pakar Fitokimia Medis Tingkat Tinggi.
+Tugas Anda adalah memberikan rekomendasi tanaman obat/herbal berdasarkan keluhan/gejala pasien.
+
+═══ DATA DATABASE KONSULTASI ═══
+{context}
+═══ AKHIR DATA DATABASE ═══
+
+═══ PETUNJUK FORMAT JAWABAN ═══
+Anda WAJIB menghasilkan output dalam format JSON array yang VALID. Setiap objek dalam array merepresentasikan tanaman obat pendukung dan harus memiliki struktur berikut secara persis:
+{{
+  "tanaman": "Nama populer tanaman obat dalam Bahasa Indonesia",
+  "nama_latin": "Nama ilmiah botani resmi (contoh: Curcuma xanthorrhiza)",
+  "deskripsi_singkat": "Penjelasan klinis/farmakologis mengapa tanaman ini cocok menyembuhkan gejala tersebut berdasarkan data database",
+  "pengolahan_rumahan": "Langkah-langkah terperinci cara membuat ramuan mandiri di rumah (misal: merebus, menyeduh)",
+  "aturan_pakai": "Dosis aman, frekuensi konsumsi per hari, dan waktu konsumsi terbaik (misal: sebelum/setelah makan)",
+  "peringatan": "Kontraindikasi klinis, potensi efek samping, tingkat toksisitas, dan risiko jika berinteraksi dengan obat kimia/medis"
+}}
+
+═══ INSTRUKSI MUTLAK ═══
+1. HANYA gunakan informasi yang sahih dari data database di atas. Jangan mengarang informasi.
+2. Pastikan output hanya berupa JSON array. Dilarang menyertakan teks pembuka (seperti "Berikut adalah...", "Tentu saja...") atau teks penutup. Langsung berikan JSON array dimulai dengan [ dan diakhiri dengan ].
+3. Seluruh isi teks di dalam nilai properti harus ditulis menggunakan Bahasa Indonesia yang profesional dan akademis.
+4. Jika tidak ada data tanaman yang cocok di dalam database, kembalikan array kosong: []"""
+
+    try:
+        # Paksa menggunakan MODEL_MEDIS_2 (Qwen/Qwen2.5-14B-Instruct)
+        res = _client.chat.completions.create(
+            model=settings.MODEL_MEDIS_2,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Berikan rekomendasi untuk keluhan/gejala: {query}"},
+            ],
+            temperature=0.0,
+            max_tokens=2500,
+        )
+
+        content = res.choices[0].message.content
+        if not content:
+            return "[]"
+        return content.strip()
+
+    except Exception as e:
+        logger.error(f"Structured recommendation generation failed: {e}", exc_info=True)
+        return "[]"
