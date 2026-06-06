@@ -80,6 +80,10 @@ class ChatRequest(BaseModel):
         default="Umum",
         description="Persona AI: Tenaga Medis, Peneliti, Pelajar, Umum",
     )
+    model_choice: Optional[str] = Field(
+        None,
+        description="Model LLM pilihan user berdasarkan role. Null = gunakan default role.",
+    )
     file_context: Optional[str] = Field(
         None,
         description="Teks hasil OCR dari file upload",

@@ -111,6 +111,7 @@ def _process_query_sync(
     query: str,
     ai_mode: str,
     file_context: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Pipeline sinkron untuk memproses query user (dijalankan di thread pool).
@@ -124,6 +125,7 @@ def _process_query_sync(
         query: Pesan teks dari pengguna.
         ai_mode: Persona AI (Tenaga Medis/Peneliti/Pelajar/Umum).
         file_context: Teks hasil OCR dari file upload (opsional).
+        model: Model LLM yang sudah tervalidasi berdasarkan role (opsional).
 
     Returns:
         Dict berisi intent_detected, ai_response, dan opsional quiz_payload.
@@ -152,6 +154,7 @@ def _process_query_sync(
                 jumlah_soal=3,
                 ai_mode=ai_mode,
                 file_context=file_data_content,
+                model=model,
             )
             return {
                 "intent_detected": "quiz_rendered",
@@ -190,6 +193,7 @@ def _process_query_sync(
         ai_mode=ai_mode,
         intent=intent,
         file_context=file_data_content,
+        model=model,
     )
 
     return {
@@ -202,6 +206,7 @@ async def process_user_query(
     query: str,
     ai_mode: str,
     file_context: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Pipeline utama (non-streaming, async) untuk memproses query user.
@@ -213,6 +218,7 @@ async def process_user_query(
         query: Pesan teks dari pengguna.
         ai_mode: Persona AI (Tenaga Medis/Peneliti/Pelajar/Umum).
         file_context: Teks hasil OCR dari file upload (opsional).
+        model: Model LLM yang sudah tervalidasi berdasarkan role (opsional).
 
     Returns:
         Dict berisi intent_detected, ai_response, dan opsional quiz_payload.
@@ -224,6 +230,7 @@ async def process_user_query(
         query,
         ai_mode,
         file_context,
+        model,
     )
     return result
 
@@ -236,6 +243,7 @@ def _stream_query_sync(
     query: str,
     ai_mode: str,
     file_context: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> Generator[dict[str, Any], None, None]:
     """
     Pipeline sinkron streaming untuk SSE (dijalankan di thread pool).
@@ -250,6 +258,7 @@ def _stream_query_sync(
         query: Pesan teks dari pengguna.
         ai_mode: Persona AI.
         file_context: Teks hasil OCR (opsional).
+        model: Model LLM yang sudah tervalidasi berdasarkan role (opsional).
 
     Yields:
         Dict dengan keys 'event' dan 'data'.
@@ -276,6 +285,7 @@ def _stream_query_sync(
                 jumlah_soal=3,
                 ai_mode=ai_mode,
                 file_context=file_data_content,
+                model=model,
             )
             yield {
                 "event": "quiz",
@@ -313,6 +323,7 @@ def _stream_query_sync(
             ai_mode=ai_mode,
             intent=intent,
             file_context=file_data_content,
+            model=model,
         ):
             full_response += token
             yield {"event": "token", "data": token}
@@ -329,6 +340,7 @@ async def process_user_query_stream(
     query: str,
     ai_mode: str,
     file_context: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """
     Pipeline streaming async untuk SSE endpoint.
@@ -340,6 +352,7 @@ async def process_user_query_stream(
         query: Pesan teks dari pengguna.
         ai_mode: Persona AI.
         file_context: Teks hasil OCR (opsional).
+        model: Model LLM yang sudah tervalidasi berdasarkan role (opsional).
 
     Yields:
         Dict event untuk SSE (intent, token, quiz, full_response, done, error).
@@ -352,7 +365,7 @@ async def process_user_query_stream(
     def _run_stream() -> None:
         """Worker: jalankan stream sync dan masukkan event ke queue."""
         try:
-            for event in _stream_query_sync(query, ai_mode, file_context):
+            for event in _stream_query_sync(query, ai_mode, file_context, model):
                 event_queue.put(event)
         except Exception as e:
             logger.error(f"Stream worker error: {e}", exc_info=True)

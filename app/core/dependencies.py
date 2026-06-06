@@ -4,6 +4,7 @@ Shared FastAPI Dependencies - JWT Authentication & RBAC Authorization.
 Modul ini menyediakan reusable dependency injection untuk:
 - Verifikasi JWT token via Authorization header.
 - Pengecekan role 'admin' di tabel profiles (RBAC).
+- Verifikasi user + role untuk model selection guardrail.
 
 Digunakan oleh seluruh API router agar tidak duplikasi logik auth (DRY).
 """
@@ -13,9 +14,70 @@ from typing import Optional
 
 from fastapi import Header, HTTPException
 
+from app.core.config import settings
 from app.core.database import supabase
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════
+# ROLE-BASED MODEL ALLOWED LIST
+# ═══════════════════════════════════════════
+
+# Maps Supabase profile role → list of allowed model setting values
+ROLE_ALLOWED_MODELS: dict[str, list[str]] = {
+    "tenaga_medis": [settings.MODEL_MEDIS_1, settings.MODEL_MEDIS_2],
+    "peneliti": [settings.MODEL_MEDIS_1, settings.MODEL_MEDIS_2],
+    "pelajar": [settings.MODEL_PELAJAR_1, settings.MODEL_PELAJAR_2],
+    "umum": [settings.MODEL_UMUM],
+}
+
+# Maps role → default model (first in allowed list)
+ROLE_DEFAULT_MODEL: dict[str, str] = {
+    "tenaga_medis": settings.MODEL_MEDIS_1,
+    "peneliti": settings.MODEL_MEDIS_1,
+    "pelajar": settings.MODEL_PELAJAR_1,
+    "umum": settings.MODEL_UMUM,
+}
+
+
+def resolve_model_for_role(role: str, model_choice: Optional[str] = None) -> str:
+    """
+    Validasi dan resolusi model berdasarkan role user.
+
+    Guardrail logic:
+    - Jika model_choice kosong/None → gunakan default model untuk role.
+    - Jika model_choice ada tapi tidak termasuk allowed list role → fallback ke default.
+    - Jika model_choice valid untuk role → gunakan model_choice.
+
+    Args:
+        role: Role user dari tabel profiles (tenaga_medis/peneliti/pelajar/umum).
+        model_choice: Model pilihan dari frontend (opsional).
+
+    Returns:
+        String model identifier yang sudah tervalidasi.
+    """
+    default_model = ROLE_DEFAULT_MODEL.get(role, settings.LLM_DEFAULT_MODEL)
+    allowed_models = ROLE_ALLOWED_MODELS.get(role, [settings.LLM_DEFAULT_MODEL])
+
+    if not model_choice or model_choice.strip() == "":
+        logger.info(
+            f"No model_choice provided for role '{role}', "
+            f"using default: {default_model}"
+        )
+        return default_model
+
+    if model_choice in allowed_models:
+        logger.info(
+            f"Model '{model_choice}' authorized for role '{role}'."
+        )
+        return model_choice
+
+    logger.warning(
+        f"Model '{model_choice}' NOT authorized for role '{role}'. "
+        f"Allowed: {allowed_models}. Falling back to default: {default_model}"
+    )
+    return default_model
 
 
 async def verify_user(authorization: Optional[str] = Header(None)) -> str:
@@ -58,6 +120,47 @@ async def verify_user(authorization: Optional[str] = Header(None)) -> str:
             status_code=401,
             detail="Token tidak valid atau sudah kadaluarsa.",
         )
+
+
+async def verify_user_with_role(
+    authorization: Optional[str] = Header(None),
+) -> dict[str, str]:
+    """
+    FastAPI Dependency: Verifikasi JWT token + ambil role dari profiles.
+
+    Mengembalikan dict berisi user_id dan role untuk digunakan
+    oleh endpoint yang memerlukan role-based model selection.
+
+    Args:
+        authorization: Header Authorization berformat 'Bearer <token>'.
+
+    Returns:
+        Dict {"user_id": str, "role": str}.
+
+    Raises:
+        HTTPException 401: Jika token tidak valid.
+    """
+    user_id = await verify_user(authorization)
+
+    # Ambil role dari tabel profiles
+    try:
+        profile = (
+            supabase.table("profiles")
+            .select("role")
+            .eq("id", user_id)
+            .execute()
+        )
+        role = "umum"  # Default fallback
+        if profile.data and profile.data[0].get("role"):
+            role = profile.data[0]["role"]
+    except Exception as e:
+        logger.warning(
+            f"Failed to fetch role for user {user_id}: {e}. "
+            "Defaulting to 'umum'."
+        )
+        role = "umum"
+
+    return {"user_id": user_id, "role": role}
 
 
 async def verify_admin(authorization: Optional[str] = Header(None)) -> str:

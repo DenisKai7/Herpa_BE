@@ -976,6 +976,7 @@ def generate_interactive_quiz_tool(
     jumlah_soal: int = 3,
     ai_mode: str = "Pelajar",
     file_context: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Generate kuis interaktif — robust, fault-tolerant, never-crash pipeline.
@@ -993,6 +994,7 @@ def generate_interactive_quiz_tool(
         jumlah_soal: Jumlah soal default (override jika terdeteksi di prompt).
         ai_mode: Persona AI target (default: Pelajar).
         file_context: Teks dari file upload pengguna (opsional).
+        model: Model LLM yang sudah tervalidasi berdasarkan role (opsional).
 
     Returns:
         Dict berisi quiz data sesuai QuizResponse schema.
@@ -1060,9 +1062,10 @@ def generate_interactive_quiz_tool(
     tools = _build_tool_schema()
 
     # ── Step 4: LLM Call ──
+    resolved_model = model or settings.LLM_DEFAULT_MODEL
     try:
         response = _client.chat.completions.create(
-            model=settings.LLM_MODEL,
+            model=resolved_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Buat kuis {jumlah_soal} soal tentang: {cleaned_topic}"},

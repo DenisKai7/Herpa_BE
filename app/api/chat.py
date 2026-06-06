@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse
 
 from app.agent.orchestrator import process_user_query, process_user_query_stream
 from app.core.database import supabase
-from app.core.dependencies import verify_user
+from app.core.dependencies import verify_user, verify_user_with_role, resolve_model_for_role
 from app.models.schemas import ChatActionRequest, ChatRequest, ChatResponse
 
 logger = logging.getLogger(__name__)
@@ -151,30 +151,38 @@ def _save_messages_to_db(
 )
 async def chat_endpoint(
     req: ChatRequest,
-    user_id: str = Depends(verify_user),
+    user_data: dict[str, str] = Depends(verify_user_with_role),
 ) -> ChatResponse:
     """
     Endpoint utama untuk mengirim pesan ke AI agent (mode blocking).
 
     Pipeline:
-    1. Verifikasi JWT token via dependency.
-    2. Proses query melalui Agentic Pipeline (intent -> retrieval -> LLM).
-    3. Simpan pesan user dan AI response ke database.
-    4. Return structured response.
+    1. Verifikasi JWT token + ambil role via dependency.
+    2. Validasi model_choice berdasarkan role (guardrail).
+    3. Proses query melalui Agentic Pipeline (intent -> retrieval -> LLM).
+    4. Simpan pesan user dan AI response ke database.
+    5. Return structured response.
 
     Args:
-        req: ChatRequest berisi message, ai_mode, dan opsional file_context/chat_id.
-        user_id: UUID user dari JWT (injected by Depends).
+        req: ChatRequest berisi message, ai_mode, model_choice, dan opsional file_context/chat_id.
+        user_data: Dict berisi user_id dan role dari JWT + profiles (injected by Depends).
 
     Returns:
         ChatResponse berisi chat_id, intent, response, dan opsional quiz_data.
     """
+    user_id = user_data["user_id"]
+    user_role = user_data["role"]
+
     try:
+        # Resolve model berdasarkan role + model_choice guardrail
+        resolved_model = resolve_model_for_role(user_role, req.model_choice)
+
         # Jalankan agentic pipeline
         pipeline_result = await process_user_query(
             query=req.message,
             ai_mode=req.ai_mode,
             file_context=req.file_context,
+            model=resolved_model,
         )
 
         is_quiz = pipeline_result.get("intent_detected") == "quiz_rendered"
@@ -215,7 +223,7 @@ async def chat_endpoint(
 @router.post("/message/stream", summary="Kirim pesan ke AI (SSE streaming)")
 async def chat_stream_endpoint(
     req: ChatRequest,
-    user_id: str = Depends(verify_user),
+    user_data: dict[str, str] = Depends(verify_user_with_role),
 ) -> StreamingResponse:
     """
     Endpoint streaming menggunakan Server-Sent Events (SSE).
@@ -229,12 +237,18 @@ async def chat_stream_endpoint(
     - done: streaming selesai, berisi chat_id.
 
     Args:
-        req: ChatRequest berisi message, ai_mode, dan opsional file_context/chat_id.
-        user_id: UUID user dari JWT (injected by Depends).
+        req: ChatRequest berisi message, ai_mode, model_choice, dan opsional file_context/chat_id.
+        user_data: Dict berisi user_id dan role dari JWT + profiles (injected by Depends).
 
     Returns:
         StreamingResponse dengan media_type text/event-stream.
     """
+    user_id = user_data["user_id"]
+    user_role = user_data["role"]
+
+    # Resolve model berdasarkan role + model_choice guardrail
+    resolved_model = resolve_model_for_role(user_role, req.model_choice)
+
     async def event_generator():
         full_ai_response = ""
         chat_id = req.chat_id
@@ -247,6 +261,7 @@ async def chat_stream_endpoint(
                 query=req.message,
                 ai_mode=req.ai_mode,
                 file_context=req.file_context,
+                model=resolved_model,
             ):
                 event_type = event["event"]
                 event_data = event["data"]

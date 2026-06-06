@@ -343,6 +343,7 @@ def generate_strict_response(
     ai_mode: str,
     intent: str,
     file_context: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> str:
     """
     Generate respons AI dengan STRICT ZERO-HALLUCINATION (blocking mode).
@@ -360,16 +361,18 @@ def generate_strict_response(
         ai_mode: Persona AI (Tenaga Medis/Peneliti/Pelajar/Umum).
         intent: Intent yang terdeteksi (konsultasi/ensiklopedia/edukasi).
         file_context: Teks dari file upload OCR (opsional).
+        model: Model LLM yang sudah tervalidasi berdasarkan role (opsional).
 
     Returns:
         String respons AI yang terformat.
     """
     system_prompt = _build_system_prompt(query, context, ai_mode, intent, file_context)
     temperature = _get_temperature(ai_mode)
+    resolved_model = model or settings.LLM_DEFAULT_MODEL
 
     try:
         res = _client.chat.completions.create(
-            model=settings.LLM_MODEL,
+            model=resolved_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": query},
@@ -399,6 +402,7 @@ def generate_streaming_response(
     ai_mode: str,
     intent: str,
     file_context: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> Generator[str, None, None]:
     """
     Generator yang menghasilkan streaming token dari LLM.
@@ -413,16 +417,18 @@ def generate_streaming_response(
         ai_mode: Persona AI.
         intent: Intent yang terdeteksi.
         file_context: Teks dari file upload OCR (opsional).
+        model: Model LLM yang sudah tervalidasi berdasarkan role (opsional).
 
     Yields:
         String token/chunk dari LLM response.
     """
     system_prompt = _build_system_prompt(query, context, ai_mode, intent, file_context)
     temperature = _get_temperature(ai_mode)
+    resolved_model = model or settings.LLM_DEFAULT_MODEL
 
     try:
         stream = _client.chat.completions.create(
-            model=settings.LLM_MODEL,
+            model=resolved_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": query},

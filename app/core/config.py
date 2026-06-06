@@ -43,7 +43,14 @@ class Settings(BaseSettings):
 
     # ─── LLM (via HuggingFace Inference API) ───
     LLM_BASE_URL: str = "https://router.huggingface.co/v1"
-    LLM_MODEL: str = "meta-llama/Llama-3.2-3B-Instruct"
+    LLM_DEFAULT_MODEL: str = "meta-llama/Llama-3.1-8B-Instruct"
+
+    # ─── ROLE-BASED MODEL SELECTION ───
+    MODEL_MEDIS_1: str = "Qwen/Qwen2.5-7B-Instruct"
+    MODEL_MEDIS_2: str = "Qwen/Qwen2.5-14B-Instruct"
+    MODEL_PELAJAR_1: str = "google/gemma-2-9b-it"
+    MODEL_PELAJAR_2: str = "google/gemma-2-27b-it"
+    MODEL_UMUM: str = "meta-llama/Llama-3.1-8B-Instruct"
 
     # ─── EMBEDDING MODEL (via HuggingFace Inference API) ───
     EMBEDDING_MODEL_NAME: str = "intfloat/multilingual-e5-base"
