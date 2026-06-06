@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     MODEL_PELAJAR_2: str = "google/gemma-2-27b-it"
     MODEL_UMUM: str = "meta-llama/Llama-3.1-8B-Instruct"
 
+    # ─── VLM MODEL (via Groq Cloud) ───
+    VLM_MODEL: str = "llama-3.2-11b-vision-instruct"
+
     # ─── EMBEDDING MODEL (via HuggingFace Inference API) ───
     EMBEDDING_MODEL_NAME: str = "intfloat/multilingual-e5-base"
 
