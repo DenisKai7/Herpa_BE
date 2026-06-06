@@ -12,7 +12,7 @@ Digunakan oleh seluruh API router agar tidak duplikasi logik auth (DRY).
 import logging
 from typing import Optional
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 
 from app.core.config import settings
 from app.core.database import supabase
@@ -204,6 +204,71 @@ async def verify_admin(authorization: Optional[str] = Header(None)) -> str:
         raise HTTPException(
             status_code=403,
             detail="Gagal memverifikasi role user.",
+        )
+
+    return user_id
+
+
+async def verify_pelajar(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+) -> str:
+    """
+    FastAPI Dependency: Verifikasi JWT token + cek role pelajar.
+
+    Melakukan langkah verifikasi:
+    1. Validasi JWT token via Supabase Auth.
+    2. Cek kolom 'role' di tabel 'profiles' harus bernilai 'pelajar'.
+    3. Simpan objek user di request.state.user.
+
+    Args:
+        request: FastAPI Request object.
+        authorization: Header Authorization berformat 'Bearer <token>'.
+
+    Returns:
+        user_id (str): UUID dari pelajar yang terautentikasi.
+
+    Raises:
+        HTTPException 401: Jika token tidak valid.
+        HTTPException 403: Jika user bukan pelajar.
+    """
+    user_id = await verify_user(authorization)
+
+    try:
+        profile = (
+            supabase.table("profiles")
+            .select("role")
+            .eq("id", user_id)
+            .execute()
+        )
+        if not profile.data:
+            raise HTTPException(
+                status_code=403,
+                detail="Akses ditolak. Profil tidak ditemukan.",
+            )
+        role = profile.data[0].get("role", "umum")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Pelajar role verification failed for {user_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=403,
+            detail="Gagal memverifikasi role user.",
+        )
+
+    # Simpan ke request.state.user
+    class RequestUser:
+        def __init__(self, uid: str, r: str):
+            self.id = uid
+            self.role = r
+
+    request.state.user = RequestUser(user_id, role)
+
+    # Strict check
+    if request.state.user.role != "pelajar":
+        raise HTTPException(
+            status_code=403,
+            detail="Akses ditolak. Fitur kuis hanya tersedia untuk akun Pelajar.",
         )
 
     return user_id

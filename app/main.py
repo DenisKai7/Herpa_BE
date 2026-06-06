@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi_limiter import FastAPILimiter
 
-from app.api import admin, auth, chat, education, recommendation, upload
+from app.api import admin, auth, chat, education, recommendation, upload, quiz
 from app.core.config import settings
 from app.core.database import close_connections, verify_neo4j_connection
 from app.core.minio_client import ensure_bucket_exists
@@ -180,6 +180,11 @@ app.include_router(
     upload.router,
     prefix="/api/files",
     tags=["Multimodal OCR"],
+)
+app.include_router(
+    quiz.router,
+    prefix="/api/quiz",
+    tags=["Chemistry Quiz Engine"],
 )
 
 

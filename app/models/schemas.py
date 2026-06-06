@@ -261,3 +261,73 @@ class MessageResponse(BaseModel):
 
     message: str
     data: Optional[dict[str, Any]] = None
+
+
+# ═══════════════════════════════════════════
+# CHEMISTRY QUIZ SCHEMAS
+# ═══════════════════════════════════════════
+
+class QuizOptionSchema(BaseModel):
+    """Satu opsi jawaban dalam pilihan ganda."""
+    label: str = Field(..., description="Label opsi, misal: A, B, C, D")
+    text: str = Field(..., description="Teks jawaban opsi")
+
+
+class QuizCategoryResponse(BaseModel):
+    """Response detail kategori kuis dengan statistik user."""
+    id: str
+    name: str
+    description: Optional[str] = None
+    high_score: Optional[float] = None
+    completion_rate: Optional[float] = None
+    total_attempts: int = 0
+
+
+class QuizQuestionResponse(BaseModel):
+    """Response satu soal kuis tanpa membocorkan jawaban benar."""
+    id: str
+    category_id: str
+    question_text: str
+    question_type: str
+    options: list[QuizOptionSchema]
+
+
+class UserAnswerSubmit(BaseModel):
+    """Jawaban user untuk satu soal kuis."""
+    question_id: str
+    choice: str = Field(..., min_length=1, max_length=1, description="Opsi pilihan user: A, B, C, atau D")
+
+
+class QuizSubmitRequest(BaseModel):
+    """Request payload saat submit jawaban kuis."""
+    category_id: str
+    duration: int = Field(..., ge=1, description="Durasi pengerjaan kuis dalam detik")
+    answers: list[UserAnswerSubmit] = Field(..., min_length=1, description="Daftar jawaban soal")
+
+
+class AnswerVerificationResult(BaseModel):
+    """Hasil verifikasi tiap butir soal kuis."""
+    question_id: str
+    user_choice: str
+    correct_choice: str
+    is_correct: bool
+    explanation: Optional[str] = None
+
+
+class QuizPerformanceRecommendation(BaseModel):
+    """Analisis performa hasil pengerjaan kuis."""
+    status_eval: str
+    weaknesses: list[str]
+    recommendations: list[str]
+
+
+class QuizSubmitResponse(BaseModel):
+    """Response setelah kuis disubmit."""
+    attempt_id: str
+    score: float
+    total_questions: int
+    correct_answers: int
+    wrong_answers: int
+    duration: int
+    results: list[AnswerVerificationResult]
+    analysis: QuizPerformanceRecommendation
