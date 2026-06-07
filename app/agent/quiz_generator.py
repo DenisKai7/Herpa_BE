@@ -80,52 +80,32 @@ _JUMLAH_PATTERN_ALT = re.compile(
 )
 
 
-def _extract_jumlah_soal(raw_prompt: str, default: int = 3) -> int:
+def _extract_jumlah_soal(raw_prompt: str, default: int = 5) -> int:
     """
     Mengekstrak jumlah soal yang diminta dari prompt pengguna.
-
-    Mencari pola seperti "5 soal", "soal 10", "3 pertanyaan", dll.
-    Clamp ke range [1, 10] untuk keamanan.
-
-    Args:
-        raw_prompt: Prompt asli dari pengguna (belum dibersihkan).
-        default: Jumlah default jika tidak terdeteksi.
-
-    Returns:
-        Integer jumlah soal (1-10).
     """
     match = _JUMLAH_PATTERN.search(raw_prompt)
     if not match:
         match = _JUMLAH_PATTERN_ALT.search(raw_prompt)
     if match:
         count = int(match.group(1))
-        clamped = max(1, min(count, 10))
-        logger.info(
-            f"Extracted jumlah_soal={clamped} from prompt "
-            f"(raw={count}, clamped={clamped})."
-        )
-        return clamped
-    return default
+    else:
+        count = default
+    clamped = max(1, min(count, 10))
+    logger.info(
+        f"Extracted jumlah_soal={clamped} from prompt (raw={count}, clamped={clamped})."
+    )
+    return clamped
 
 
 def _clean_topic(raw_prompt: str) -> str:
     """
     Membersihkan noise percakapan dari prompt dan mengekstrak topik inti.
-
-    Contoh:
-    - "tolong buatkan kuis 5 soal mengenai tanaman herbal" -> "tanaman herbal"
-    - "kuis tentang kurkumin pada temulawak" -> "kurkumin temulawak"
-    - "buat soal kimia organik tingkat kesulitan tinggi" -> "kimia organik"
-
-    Args:
-        raw_prompt: Prompt asli dari pengguna.
-
-    Returns:
-        String topik yang sudah dibersihkan.
     """
     cleaned = raw_prompt.strip()
 
     # Remove number-of-questions phrases before general cleaning
+    cleaned = re.sub(r'(\d+)\s*(?:soal|pertanyaan)', "", cleaned, flags=re.IGNORECASE)
     cleaned = _JUMLAH_PATTERN.sub("", cleaned)
     cleaned = _JUMLAH_PATTERN_ALT.sub("", cleaned)
 
@@ -152,7 +132,6 @@ def _clean_topic(raw_prompt: str) -> str:
 # [2] ADAPTIVE HYBRID RETRIEVAL
 # ═══════════════════════════════════════════
 
-# Pre-defined general corpus summaries for broad domains
 _GENERAL_CORPUS: dict[str, str] = {
     "kimia": (
         "Kimia farmasi mencakup studi tentang senyawa kimia yang terdapat dalam "
@@ -201,7 +180,6 @@ _GENERAL_CORPUS: dict[str, str] = {
     ),
 }
 
-# Keywords that map to general corpus categories
 _BROAD_KEYWORD_MAP: dict[str, list[str]] = {
     "kimia": [
         "kimia", "chemistry", "senyawa", "reaksi", "molekul",
@@ -223,15 +201,6 @@ _BROAD_KEYWORD_MAP: dict[str, list[str]] = {
 
 
 def _detect_broad_domain(topic: str) -> Optional[str]:
-    """
-    Mendeteksi apakah topik termasuk kategori umum/broad.
-
-    Args:
-        topic: Topik yang sudah dibersihkan.
-
-    Returns:
-        Key domain dari _GENERAL_CORPUS jika broad, None jika spesifik.
-    """
     topic_lower = topic.lower()
     for domain, keywords in _BROAD_KEYWORD_MAP.items():
         for kw in keywords:
@@ -245,21 +214,9 @@ def _vector_search_quiz(
     limit: int = 5,
     threshold: float = 0.7,
 ) -> list[dict[str, Any]]:
-    """
-    Pencarian semantik via Supabase pgvector untuk konteks kuis.
-
-    Args:
-        query: Teks query yang sudah dibersihkan.
-        limit: Jumlah hasil maksimal.
-        threshold: Similarity threshold minimum.
-
-    Returns:
-        List of dict hasil pencarian.
-    """
     try:
         query_embedding = embed_text(query)
 
-        # Try education materials first
         result = supabase.rpc("match_education", {
             "query_embedding": query_embedding,
             "match_count": limit,
@@ -267,13 +224,9 @@ def _vector_search_quiz(
         }).execute()
 
         if result.data:
-            logger.info(
-                f"Quiz vector search (education): "
-                f"{len(result.data)} results (threshold={threshold})."
-            )
+            logger.info(f"Quiz vector search (education): {len(result.data)} results.")
             return result.data
 
-        # Fallback to plants table
         result = supabase.rpc("match_plants", {
             "query_embedding": query_embedding,
             "match_count": limit,
@@ -281,32 +234,16 @@ def _vector_search_quiz(
         }).execute()
 
         if result.data:
-            logger.info(
-                f"Quiz vector search (plants): "
-                f"{len(result.data)} results (threshold={threshold})."
-            )
+            logger.info(f"Quiz vector search (plants): {len(result.data)} results.")
             return result.data
 
         return []
-
     except Exception as e:
         logger.error(f"Quiz vector search error: {e}", exc_info=True)
         return []
 
 
 def _graph_search_quiz(topic: str) -> list[dict[str, Any]]:
-    """
-    Pencarian graph Neo4j untuk konteks kuis yang mendalam.
-
-    Mencari relasi Herb->Compound dan Herb->TherapeuticUse
-    sesuai dengan schema aktual database Neo4j.
-
-    Args:
-        topic: Topik kuis yang sudah dibersihkan.
-
-    Returns:
-        List of dict hasil Cypher query.
-    """
     cypher = """
     MATCH (h:Herb)
     WHERE toLower(h.name) CONTAINS toLower($query)
@@ -327,25 +264,11 @@ def _graph_search_quiz(topic: str) -> list[dict[str, Any]]:
         logger.info(f"Quiz graph search: {len(result)} records for '{topic[:40]}'.")
         return result
     except Exception as e:
-        logger.error(
-            f"Quiz graph search — Neo4j connectivity lost or query failed: {e}",
-            exc_info=True,
-        )
+        logger.error(f"Quiz graph search — Neo4j query failed: {e}", exc_info=True)
         return []
 
 
 def _broad_graph_search(domain: str) -> list[dict[str, Any]]:
-    """
-    Pencarian graph wildcard untuk topik umum/broad.
-
-    Mengambil sampel node dari Neo4j tanpa filter spesifik.
-
-    Args:
-        domain: Domain yang terdeteksi (kimia/tanaman_obat/farmasi/herbal).
-
-    Returns:
-        List of dict hasil Cypher query.
-    """
     cypher = """
     MATCH (h:Herb)
     OPTIONAL MATCH (h)-[:HAS_COMPOUND]->(c:Compound)
@@ -359,36 +282,16 @@ def _broad_graph_search(domain: str) -> list[dict[str, Any]]:
     try:
         records, _, _ = neo4j_driver.execute_query(cypher)
         result = [record.data() for record in records]
-        logger.info(
-            f"Broad graph search for domain '{domain}': "
-            f"{len(result)} records."
-        )
+        logger.info(f"Broad graph search for domain '{domain}': {len(result)} records.")
         return result
     except Exception as e:
-        logger.error(
-            f"Broad graph search — Neo4j connectivity lost or query failed: {e}",
-            exc_info=True,
-        )
+        logger.error(f"Broad graph search failed: {e}", exc_info=True)
         return []
 
 
-def _format_records(
-    records: list[dict[str, Any]],
-    source_label: str,
-) -> str:
-    """
-    Mengubah list of dict menjadi teks terstruktur untuk konteks LLM.
-
-    Args:
-        records: List of dict dari hasil pencarian.
-        source_label: Label sumber untuk header.
-
-    Returns:
-        String terformat.
-    """
+def _format_records(records: list[dict[str, Any]], source_label: str) -> str:
     if not records:
         return ""
-
     lines: list[str] = [f"[{source_label} - {len(records)} hasil]:"]
     for i, rec in enumerate(records, 1):
         parts: list[str] = []
@@ -401,26 +304,6 @@ def _format_records(
 
 
 def _retrieve_quiz_context(topic: str) -> tuple[str, bool, bool]:
-    """
-    Adaptive hybrid retrieval: mengadaptasi strategi berdasarkan cakupan topik.
-
-    Strategy:
-    - Case A (Specific): Vector search (threshold 0.7) + Neo4j graph traversal.
-    - Case B (Broad/General): Lowered vector search -> broad graph search
-      -> general knowledge corpus fallback.
-
-    Graceful degradation: jika Neo4j drop/unreachable, pipeline tetap
-    berjalan menggunakan data vector-only dari Supabase.
-
-    Args:
-        topic: Topik kuis yang sudah dibersihkan.
-
-    Returns:
-        Tuple (context_string, is_broad, graph_available):
-        - is_broad=True jika topik umum.
-        - graph_available=True jika graph data berhasil diambil.
-    """
-    # ── STEP 1: Try specific vector search (high threshold) ──
     vector_results = _vector_search_quiz(topic, limit=5, threshold=0.7)
     graph_results = _graph_search_quiz(topic)
 
@@ -432,55 +315,31 @@ def _retrieve_quiz_context(topic: str) -> tuple[str, bool, bool]:
 
     if has_specific_data:
         context = "\n\n".join(filter(None, [vector_text, graph_text]))
-        logger.info(
-            f"Specific retrieval successful: "
-            f"{len(vector_results)} vector + {len(graph_results)} graph results."
-        )
         return context, False, graph_available
 
-    # ── STEP 2: Fallback — lowered threshold vector search ──
-    logger.info(
-        f"No specific results for '{topic[:40]}', "
-        "trying lowered threshold (0.4)..."
-    )
+    logger.info(f"No specific results for '{topic[:40]}', trying threshold (0.4)...")
     vector_results_low = _vector_search_quiz(topic, limit=8, threshold=0.4)
     vector_text_low = _format_records(vector_results_low, "Pencarian Semantik (Diperluas)")
 
     if vector_results_low:
         broad_graph = _broad_graph_search("general")
         broad_graph_text = _format_records(broad_graph, "Data Umum Database")
-        broad_graph_ok = bool(broad_graph)
         context = "\n\n".join(filter(None, [vector_text_low, broad_graph_text]))
-        logger.info(
-            f"Lowered-threshold retrieval: {len(vector_results_low)} results."
-        )
-        return context, True, broad_graph_ok
+        return context, True, bool(broad_graph)
 
-    # ── STEP 3: Fallback — broad graph search + general corpus ──
-    logger.info(
-        f"Vector search empty for '{topic[:40]}', "
-        "falling back to broad graph + general corpus..."
-    )
+    logger.info(f"Vector search empty for '{topic[:40]}', falling back to corpus...")
     domain = _detect_broad_domain(topic)
     broad_graph = _broad_graph_search(domain or "general")
     broad_graph_text = _format_records(broad_graph, "Data Umum Database")
-    broad_graph_ok = bool(broad_graph)
 
-    # Inject pre-defined general corpus summary
-    corpus_text = ""
     if domain and domain in _GENERAL_CORPUS:
         corpus_text = f"[Ringkasan Pengetahuan Domain '{domain.upper()}']:\n{_GENERAL_CORPUS[domain]}"
-        logger.info(f"Injected general corpus for domain: '{domain}'.")
     else:
-        # Combine all general corpuses as catch-all
-        all_corpus = "\n\n".join(
-            f"[{k.upper()}]: {v}" for k, v in _GENERAL_CORPUS.items()
-        )
+        all_corpus = "\n\n".join(f"[{k.upper()}]: {v}" for k, v in _GENERAL_CORPUS.items())
         corpus_text = f"[Ringkasan Pengetahuan Umum Farmasi & Tanaman Obat]:\n{all_corpus}"
-        logger.info("Injected full general corpus (no specific domain matched).")
 
     context = "\n\n".join(filter(None, [broad_graph_text, corpus_text]))
-    return context, True, broad_graph_ok
+    return context, True, bool(broad_graph)
 
 
 # ═══════════════════════════════════════════
@@ -496,32 +355,10 @@ def _build_quiz_system_prompt(
     graph_available: bool = True,
     file_context: Optional[str] = None,
 ) -> str:
-    """
-    Membangun system prompt untuk quiz generation yang scope-aware.
-
-    Prompt disesuaikan berdasarkan:
-    - is_broad: True -> soal konseptual/fundamental. False -> soal case-study mendalam.
-    - ai_mode: persona (Pelajar -> bahasa ringan, Tenaga Medis -> terminologi klinis, dll).
-    - graph_available: False -> instruksi khusus untuk adaptasi ke teks-only context.
-
-    Args:
-        context_data: Konteks dari adaptive retrieval.
-        jumlah_soal: Jumlah soal yang diminta.
-        ai_mode: Persona AI (Pelajar, Tenaga Medis, Peneliti, Umum).
-        is_broad: True jika topik umum/general.
-        topic: Topik yang sudah dibersihkan (untuk referensi).
-        graph_available: True jika data graph Neo4j berhasil diambil.
-        file_context: Teks dari file upload (opsional).
-
-    Returns:
-        System prompt string.
-    """
     file_instruction = ""
     if file_context:
-        # Truncate to 3500 chars to leave room for directive text
         safe_context = file_context[:3500]
         file_instruction = f"""
-
 ═══ DATA KONTEKS FILE YANG DIUNGGAH USER (PRIORITAS TERTINGGI) ═══
 {safe_context}
 ═══ AKHIR DATA FILE ═══
@@ -533,69 +370,34 @@ CRITICAL DIRECTIVE:
 4. Fokus pada senyawa, mekanisme, dan data spesifik yang ada dalam file.
 5. Lengkapi dengan database hanya jika konten file tidak cukup untuk jumlah soal yang diminta."""
 
-    # Scope-specific generation instructions
     if is_broad:
         scope_instruction = (
             "SCOPE: TOPIK UMUM/GENERAL.\n"
-            "- Buat soal KONSEPTUAL dan FUNDAMENTAL yang mencakup prinsip dasar "
-            "dari domain yang diminta.\n"
-            "- Fokus pada pemahaman definisi, klasifikasi, fungsi umum, dan "
-            "perbandingan antar konsep.\n"
-            "- Gunakan data dari konteks sebagai bahan soal, tetapi boleh "
-            "menyusun soal yang menguji pemahaman lintas-konsep.\n"
-            "- Soal harus bervariasi: definisi, perbandingan, sebab-akibat, "
-            "dan penerapan.\n"
+            "- Buat soal KONSEPTUAL dan FUNDAMENTAL yang mencakup prinsip dasar dari domain yang diminta.\n"
+            "- Fokus pada pemahaman definisi, klasifikasi, fungsi umum, dan perbandingan antar konsep.\n"
+            "- Soal harus bervariasi: definisi, perbandingan, sebab-akibat, dan penerapan.\n"
             f"- Topik utama yang diminta pengguna: \"{topic}\"."
         )
     else:
         scope_instruction = (
             "SCOPE: TOPIK SPESIFIK.\n"
-            "- Buat soal MENDALAM dan CASE-STUDY style yang fokus pada mekanisme, "
-            "senyawa spesifik, dan interaksi klinis dari data konteks.\n"
-            "- Sertakan detail seperti nama senyawa aktif, mekanisme aksi, "
-            "efek farmakologis, dan interaksi obat yang ada dalam data.\n"
-            "- Soal harus menguji kemampuan analisis dan penerapan, "
-            "bukan sekadar hafalan.\n"
+            "- Buat soal MENDALAM dan CASE-STUDY style yang fokus pada mekanisme, senyawa spesifik, dan interaksi klinis.\n"
+            "- Sertakan detail seperti nama senyawa aktif, mekanisme aksi, efek farmakologis, dan interaksi obat.\n"
             f"- Topik spesifik: \"{topic}\"."
         )
 
-    # Persona language adaptation
     persona_map: dict[str, str] = {
-        "Tenaga Medis": (
-            "Gunakan terminologi klinis dan farmakologis yang presisi. "
-            "Soal harus setara level kompetensi tenaga kesehatan profesional."
-        ),
-        "Peneliti": (
-            "Gunakan bahasa ilmiah formal. Sertakan nama latin, kelas senyawa, "
-            "dan terminologi metodologis (IC50, GC-MS, HPLC) dalam soal."
-        ),
-        "Pelajar": (
-            "Gunakan bahasa yang edukatif dan mudah dipahami. "
-            "Sertakan pembahasan yang menjelaskan konsep step-by-step. "
-            "Cocok untuk mahasiswa farmasi/biologi/kedokteran."
-        ),
-        "Umum": (
-            "Gunakan bahasa sehari-hari yang sederhana dan mudah dipahami. "
-            "Hindari jargon teknis. Fokus pada manfaat praktis dan "
-            "pengetahuan umum tentang tanaman obat/herbal."
-        ),
+        "Tenaga Medis": "Gunakan terminologi klinis dan farmakologis yang presisi. Soal setara level tenaga kesehatan profesional.",
+        "Peneliti": "Gunakan bahasa ilmiah formal. Sertakan nama latin, kelas senyawa, dan terminologi metodologis (IC50, GC-MS, HPLC).",
+        "Pelajar": "Gunakan bahasa yang edukatif, mudah dipahami, cocok untuk mahasiswa farmasi/biologi/kedokteran/Kimia SMA.",
+        "Umum": "Gunakan bahasa sehari-hari yang sederhana dan mudah dipahami. Hindari jargon teknis. Fokus pada manfaat praktis.",
     }
     persona_instruction = persona_map.get(ai_mode, persona_map["Pelajar"])
 
-    # Data source adaptation instruction
     if graph_available:
-        source_instruction = (
-            "Data konteks berasal dari pencarian semantik DAN relasi graph database. "
-            "Manfaatkan kedua sumber untuk membuat soal yang kaya dan mendalam."
-        )
+        source_instruction = "Data konteks berasal dari pencarian semantik DAN relasi graph database. Manfaatkan keduanya untuk membuat soal."
     else:
-        source_instruction = (
-            "CATATAN: Data relasi graph tidak tersedia saat ini. "
-            "Konteks yang disediakan berasal SEPENUHNYA dari pencarian teks/semantik. "
-            "Adaptasi soal berdasarkan informasi teks yang tersedia — "
-            "fokus pada fakta, deskripsi, dan konsep yang disebutkan dalam data. "
-            "Tetap buat soal berkualitas tinggi meskipun tanpa data relasi antar-entitas."
-        )
+        source_instruction = "Data berasal sepenuhnya dari pencarian teks. Adaptasikan soal berdasarkan informasi teks yang tersedia."
 
     return f"""Anda adalah Sistem Pembuat Kuis Farmasi & Kimia yang ketat dan akurat.
 Target pengguna: {ai_mode}.
@@ -608,19 +410,22 @@ Target pengguna: {ai_mode}.
 
 ═══ {scope_instruction} ═══
 
-═══ INSTRUKSI MUTLAK ═══
-1. Buat TEPAT {jumlah_soal} soal berdasarkan [DATA DATABASE] di bawah.
-2. HANYA gunakan informasi dari data yang disediakan sebagai basis soal.
-3. JANGAN mengarang informasi ilmiah yang tidak ada dalam data.
-4. CRITICAL: Every question MUST have exactly 4 multiple-choice options mapped cleanly to prefixes A, B, C, and D. Never output more or fewer than 4 options.
-5. Pembahasan harus merujuk pada data database, bukan pengetahuan umum.
-6. Variasikan tingkat kesulitan: Mudah, Menengah, dan HOTS.
-7. Setiap opsi jawaban yang salah (distraktor) harus masuk akal, bukan jelas salah.
-8. Format id_soal sebagai "Q-01", "Q-02", dst.
-9. EVALUATION MANDATE: Fill the `penjelasan_salah` property with a concise sentence explaining why alternative options fail. Fill the root-level `analisis_performa.sorotan` and `area_fokus` with deeply academic, high-quality analytical reviews customized to the user's performance target (e.g., Tingkat SMA).
+═══ ATURAN MUTLAK PEMBUATAN OPSI JAWABAN (DISTRACTORS) ═══
+- Pilihan jawaban (A, B, C, D) WAJIB bervariasi, unik, dan dirancang secara ilmiah sesuai dengan topik pertanyaan.
+- DILARANG KERAS mengulang-ulang opsi generik yang sama (seperti 'Flavonoid', 'Asam lemak jenuh', 'Protein struktural') di setiap soal!
+- Jika pertanyaan membahas tentang tata nama senyawa, maka opsi harus berupa nama senyawa kimia. Jika membahas termokimia, opsi harus berupa nilai entalpi atau jenis reaksi (eksoterm/endoterm).
+- Buat pengecoh (distractors) yang cerdas dan masuk akal bagi target pengguna.
+
+═══ INSTRUKSI MUTLAK OUTPUT FORMAT ═══
+1. Buat TEPAT {jumlah_soal} soal berdasarkan data di bawah.
+2. Setiap pertanyaan WAJIB memiliki tepat 4 pilihan ganda (A, B, C, D).
+3. Anda WAJIB langsung mengeluarkan jawaban dalam bentuk struktur objek JSON valid yang mematuhi skema QuizResponse.
+4. JANGAN menyertakan teks pembuka, penutup, atau penanda blok kode markdown di luar struktur objek tersebut. Output harus berupa RAW JSON murni yang langsung dapat di-parse.
+5. Format id_soal sebagai "Q-01", "Q-02", dst.
+6. Isi properti `penjelasan_salah` untuk menerangkan mengapa opsi lain salah. Fill root-level `analisis_performa.sorotan` and `area_fokus` with deeply academic, high-quality analytical reviews.
 
 ═══ CRITICAL MANDATE ═══
-CRITICAL MANDATE: You MUST generate EXACTLY {jumlah_soal} multiple-choice questions. Do not leave the questions array empty under any circumstances. If the provided context text is short or general, utilize your foundational training data regarding Indonesian medicinal plants (like Temulawak, Sambiloto, Kunyit) to fulfill the exact count of {jumlah_soal} questions matching the educational level requested.
+Anda harus membuat EXACTLY {jumlah_soal} soal pilihan ganda. Jangan biarkan array kosong. Jika konteks database pendek, manfaatkan ilmu dasar fito-farmaka Anda (seperti Ginseng, Temulawak, Kunyit, Sambiloto) untuk melengkapi total {jumlah_soal} soal yang valid.
 {file_instruction}
 ═══ DATA DATABASE MULAI ═══
 {context_data}
@@ -628,16 +433,17 @@ CRITICAL MANDATE: You MUST generate EXACTLY {jumlah_soal} multiple-choice questi
 
 
 # ═══════════════════════════════════════════
-# TOOL SCHEMA BUILDER
+# PARSING & UTILITIES LAYER
 # ═══════════════════════════════════════════
 
-def _build_tool_schema() -> list[dict[str, Any]]:
+def _build_tool_schema(jumlah_soal: int) -> list[dict[str, Any]]:
     """
-    Membangun definisi tool untuk OpenAI Tool-Calling.
-
-    Returns:
-        List berisi satu tool definition berbasis QuizResponse schema.
+    Membangun definisi tool kustom formal untuk skema QuizResponse.
     """
+    schema = QuizResponse.model_json_schema()
+    if "properties" in schema and "daftar_soal" in schema["properties"]:
+        schema["properties"]["daftar_soal"]["minItems"] = jumlah_soal
+        schema["properties"]["daftar_soal"]["maxItems"] = jumlah_soal
     return [
         {
             "type": "function",
@@ -647,328 +453,203 @@ def _build_tool_schema() -> list[dict[str, Any]]:
                     "Merender kuis interaktif dengan soal pilihan ganda, "
                     "jawaban benar, dan pembahasan langkah demi langkah."
                 ),
-                "parameters": QuizResponse.model_json_schema(),
+                "parameters": schema,
             },
         }
     ]
 
 
-# ═══════════════════════════════════════════
-# [4] MULTI-LAYER PARSING & SYNTHETIC FALLBACK
-# ═══════════════════════════════════════════
-
 def _parse_tool_calls(message: Any) -> Optional[dict[str, Any]]:
     """
-    Check 1: Parse formal API tool_calls dari response LLM.
-
-    Args:
-        message: Message object dari LLM response.
-
-    Returns:
-        Dict parsed arguments jika berhasil, None jika tidak ada tool_calls.
+    Check 1: Parse formal API tool_calls dari response LLM secara aman.
     """
     if not hasattr(message, "tool_calls") or not message.tool_calls:
         return None
 
     tool_call = message.tool_calls[0]
-
     if tool_call.function.name != "render_interactive_quiz":
-        logger.warning(
-            f"Unexpected tool call: '{tool_call.function.name}' "
-            f"(expected 'render_interactive_quiz')."
-        )
+        logger.warning(f"Unexpected tool call function: '{tool_call.function.name}'")
         return None
 
     try:
         raw = json.loads(tool_call.function.arguments)
-        logger.info("Parsed quiz from tool_calls successfully.")
-
-        # ── ZERO-QUESTION INTERCEPTOR (Defense Layer 1) ──
-        # Catch empty questions at the earliest parsing stage
+        logger.info("Parsed quiz from formal tool_calls parameter block successfully.")
+        
         questions_list = raw.get("daftar_soal", []) or raw.get("questions", [])
-
         if not questions_list or len(questions_list) == 0:
-            logger.warning(
-                "LLM returned 0 questions via tool_calls. "
-                "Overriding with premium synthetic fallback questions."
-            )
-            raw["daftar_soal"] = [
-                {
-                    "id_soal": "Q1",
-                    "tingkat_kesulitan": "Umum",
-                    "pertanyaan": (
-                        "Tanaman obat asli Indonesia yang kaya akan senyawa kurkuminoid "
-                        "dan berfungsi efektif sebagai pelindung sel hati (hepatoprotektor) adalah..."
-                    ),
-                    "opsi_jawaban": [
-                        {"label": "A", "text": "Temulawak"},
-                        {"label": "B", "text": "Sambiloto"},
-                        {"label": "C", "text": "Mahkota Dewa"},
-                        {"label": "D", "text": "Daun Meniran"},
-                    ],
-                    "jawaban_benar": "A",
-                    "pembahasan": [
-                        "Temulawak (Curcuma zanthorrhiza) terbukti secara klinis "
-                        "mengandung kurkumin yang melindungi organ hati dari toksin."
-                    ],
-                    "penjelasan_salah": "Sambiloto, Mahkota Dewa, dan Daun Meniran tidak dikenal secara utama memiliki kandungan kurkuminoid sebagai pelindung hati.",
-                },
-                {
-                    "id_soal": "Q2",
-                    "tingkat_kesulitan": "Umum",
-                    "pertanyaan": (
-                        "Zat marker aktif utama pada tanaman Sambiloto yang bertanggung jawab "
-                        "terhadap stimulasi sistem imun (imunomodulator) adalah..."
-                    ),
-                    "opsi_jawaban": [
-                        {"label": "A", "text": "Alisin"},
-                        {"label": "B", "text": "Andrographolide"},
-                        {"label": "C", "text": "Piperin"},
-                        {"label": "D", "text": "Gidrosida"},
-                    ],
-                    "jawaban_benar": "B",
-                    "pembahasan": [
-                        "Andrographolide adalah senyawa aktif pahit pada Sambiloto "
-                        "yang bertindak meningkatkan imunitas tubuh."
-                    ],
-                    "penjelasan_salah": "Alisin, Piperin, dan Gidrosida bukan merupakan zat marker aktif utama pembawa imunomodulator pada Sambiloto.",
-                },
-            ]
-            if "analisis_performa" not in raw:
-                raw["analisis_performa"] = {
-                    "sorotan": [
-                        "Mengidentifikasi khasiat tanaman obat Temulawak secara akurat.",
-                        "Memahami senyawa marker aktif imunomodulator pada Sambiloto."
-                    ],
-                    "area_fokus": [
-                        "Meningkatkan pemahaman mengenai spesies tumbuhan obat lainnya.",
-                        "Perlu mempelajari klasifikasi senyawa fitokimia secara komprehensif."
-                    ]
-                }
-            logger.info(
-                f"Injected {len(raw['daftar_soal'])} fallback questions at parsing stage."
-            )
-
+            logger.warning("LLM returned empty questions list via tool_calls. Triggering next layer.")
+            return None
+            
         return raw
     except json.JSONDecodeError as e:
-        logger.warning(f"tool_call JSON parse failed: {e}")
+        logger.warning(f"tool_call JSON parsing error chunk: {e}")
         return None
 
 
 def _parse_content_regex(message: Any) -> Optional[dict[str, Any]]:
     """
     Check 2: Extract JSON dari content string menggunakan regex.
-
-    Handles:
-    - JSON di dalam markdown code blocks (```json ... ```)
-    - JSON object langsung di dalam content string
-
-    Args:
-        message: Message object dari LLM response.
-
-    Returns:
-        Dict parsed JSON jika berhasil, None jika tidak ditemukan.
     """
     content = getattr(message, "content", None)
     if not content:
         return None
 
-    # Try markdown code block first
-    md_match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", content)
-    if md_match:
-        try:
-            raw = json.loads(md_match.group(1))
-            logger.info("Parsed quiz from markdown code block via regex.")
-            return raw
-        except json.JSONDecodeError:
-            pass
+    content_clean = content.strip()
+    
+    # PROTEKSI ANTI-POTONG: Menggunakan escape heksadesimal '\x60' untuk backtick
+    # Ini 100% menjamin teks kode program tidak akan merusak markdown formatter luar
+    triple_backtick = "\x60\x60\x60"
+    if content_clean.startswith(triple_backtick):
+        content_clean = re.sub(r"^[\x60]{3}(?:json)?\s*", "", content_clean, flags=re.IGNORECASE)
+        content_clean = re.sub(r"\s*[\x60]{3}$", "", content_clean)
 
-    # Try raw JSON object in content
+    try:
+        raw = json.loads(content_clean.strip())
+        logger.info("Parsed quiz from clean string content successfully.")
+        return raw
+    except json.JSONDecodeError:
+        pass
+
     json_match = re.search(r"(\{[\s\S]*\"daftar_soal\"[\s\S]*\})", content)
     if json_match:
         try:
             raw = json.loads(json_match.group(1))
-            logger.info("Parsed quiz from raw JSON in content via regex.")
+            logger.info("Parsed quiz from nested JSON bracket structure via regex.")
             return raw
         except json.JSONDecodeError:
             pass
 
-    logger.warning("Regex JSON extraction failed on content.")
+    logger.warning("Regex JSON extraction completely failed on content string.")
     return None
 
 
-def _generate_synthetic_quiz(topic: str, jumlah_soal: int) -> dict[str, Any]:
-    """
-    Check 3 (Ultimate Fail-Safe): Local Synthetic Quiz Generator.
-
-    Programmatically builds a valid quiz JSON payload from standardized
-    templates when all LLM parsing methods fail. Guarantees the user
-    always receives a functional quiz UI.
-
-    Args:
-        topic: Topik kuis yang diminta (sudah dibersihkan).
-        jumlah_soal: Jumlah soal (clamped ke max 3 untuk synthetic).
-
-    Returns:
-        Dict sesuai QuizResponse schema.
-    """
-    logger.warning(
-        f"SYNTHETIC FALLBACK TRIGGERED for topic='{topic[:50]}'. "
-        "LLM output was unparsable — generating template quiz."
-    )
-
-    # Standardized template questions about medicinal plants & chemistry
-    _TEMPLATES: list[dict[str, Any]] = [
-        {
-            "id_soal": "Q-01",
-            "tingkat_kesulitan": "Mudah",
-            "pertanyaan": (
-                f"Manakah dari berikut ini yang paling tepat menggambarkan "
-                f"bidang studi terkait \"{topic}\"?"
-            ),
-            "opsi_jawaban": [
-                {"label": "A", "text": "Studi tentang senyawa kimia aktif dalam tumbuhan obat dan khasiatnya."},
-                {"label": "B", "text": "Studi tentang teknik pertanian modern untuk tanaman pangan."},
-                {"label": "C", "text": "Studi tentang genetika molekuler hewan vertebrata."},
-                {"label": "D", "text": "Studi tentang teknologi pengolahan makanan industri."},
-            ],
-            "jawaban_benar": "A",
-            "pembahasan": [
-                f"Topik \"{topic}\" berkaitan erat dengan ilmu farmakognosi and fitokimia.",
-                "Bidang ini mempelajari senyawa kimia aktif (metabolit sekunder) dalam tumbuhan obat.",
-                "Metabolit sekunder meliputi alkaloid, flavonoid, terpenoid, dan saponin yang memiliki aktivitas farmakologis.",
-            ],
-            "penjelasan_salah": "Opsi B, C, dan D salah karena teknik pertanian modern, genetika vertebrata, dan pengolahan pangan bukan merupakan fokus utama studi fitokimia dan farmakognosi.",
-        },
-        {
-            "id_soal": "Q-02",
-            "tingkat_kesulitan": "Menengah",
-            "pertanyaan": (
-                "Golongan senyawa metabolit sekunder manakah yang paling dikenal "
-                "memiliki aktivitas antioksidan kuat pada tanaman obat?"
-            ),
-            "opsi_jawaban": [
-                {"label": "A", "text": "Flavonoid"},
-                {"label": "B", "text": "Asam lemak jenuh"},
-                {"label": "C", "text": "Protein struktural"},
-                {"label": "D", "text": "Karbohidrat sederhana"},
-            ],
-            "jawaban_benar": "A",
-            "pembahasan": [
-                "Flavonoid adalah golongan polifenol yang banyak ditemukan pada tanaman obat.",
-                "Senyawa ini memiliki gugus hidroksil (-OH) yang mampu mendonorkan elektron kepada radikal bebas.",
-                "Mekanisme ini menjadikan flavonoid sebagai antioksidan alami yang potensial.",
-            ],
-            "penjelasan_salah": "Opsi B, C, dan D salah karena asam lemak jenuh, protein struktural, dan karbohidrat sederhana tidak dikenal memiliki sifat antioksidan kuat seperti flavonoid.",
-        },
-        {
-            "id_soal": "Q-03",
-            "tingkat_kesulitan": "HOTS",
-            "pertanyaan": (
-                "Seorang pasien mengonsumsi obat pengencer darah (warfarin) "
-                "dan ingin menggunakan herbal yang mengandung senyawa kumarin. "
-                "Apa risiko utama interaksi yang mungkin terjadi?"
-            ),
-            "opsi_jawaban": [
-                {"label": "A", "text": "Peningkatan efek antikoagulan yang dapat menyebabkan perdarahan."},
-                {"label": "B", "text": "Penurunan tekanan darah secara drastis."},
-                {"label": "C", "text": "Reaksi alergi berupa ruam kulit."},
-                {"label": "D", "text": "Gangguan pencernaan ringan yang bersifat sementara."},
-            ],
-            "jawaban_benar": "A",
-            "pembahasan": [
-                "Kumarin dan warfarin sama-sama memiliki efek antikoagulan.",
-                "Penggunaan bersamaan dapat menyebabkan sinergisme yang meningkatkan risiko perdarahan.",
-                "Ini adalah contoh interaksi obat-herbal yang harus diwaspadai oleh tenaga kesehatan.",
-                "Pasien yang mengonsumsi antikoagulan harus berkonsultasi sebelum menggunakan herbal.",
-            ],
-            "penjelasan_salah": "Opsi B, C, dan D salah karena efek sinergis dengan kumarin berfokus pada antikoagulan/perdarahan, bukan pada tekanan darah, ruam kulit, atau gangguan pencernaan.",
-        },
-    ]
-
-    # Select the requested number of questions
-    selected = _TEMPLATES[:min(jumlah_soal, len(_TEMPLATES))]
-
-    # ── Internal Pydantic validation (uses daftar_soal schema) ──
-    analisis_performa_data = {
-        "sorotan": [
-            f"Memahami konsep dasar fitokimia dan farmakognosi terkait {topic}.",
-            "Mampu mengidentifikasi golongan senyawa aktif dan potensi aktivitas biologisnya."
-        ],
-        "area_fokus": [
-            "Perlu memperdalam mekanisme interaksi obat-herbal secara spesifik.",
-            "Meningkatkan pemahaman mengenai teknik isolasi dan karakterisasi senyawa aktif."
-        ]
-    }
-    internal_quiz = {
-        "topik": topic if topic else "Tanaman Obat & Kimia Farmasi",
-        "daftar_soal": selected,
-        "analisis_performa": analisis_performa_data,
-    }
-
-    try:
-        validated = QuizResponse.model_validate(internal_quiz)
-        logger.info(
-            f"Synthetic quiz generated: {len(validated.daftar_soal)} soal, "
-            f"topik='{validated.topik}'."
-        )
-    except Exception as e:
-        logger.error(
-            f"Synthetic quiz Pydantic validation failed (critical): {e}",
-            exc_info=True,
-        )
-        validated = None
-
-    # ── Build frontend-aligned payload with `questions` key ──
-    # The frontend expects:
-    #   { topik, questions: [{ question, options, answer, explanation, penjelasan_salah }] }
-    # where options are "A. text" strings and answer is the full "A. text".
-    source = validated.daftar_soal if validated else selected
-    frontend_questions: list[dict[str, Any]] = []
-    for item in source:
-        q = item if isinstance(item, dict) else item.model_dump()
-        # Build "A. text" style options list
-        options_raw = q.get("opsi_jawaban", [])
-        labeled_options: list[str] = []
+def _map_to_frontend_payload(validated_quiz_dict: dict[str, Any], count: int) -> dict[str, Any]:
+    source_questions = validated_quiz_dict.get("daftar_soal", [])
+    mapped_questions = []
+    for i, item in enumerate(source_questions[:count]):
+        options_raw = item.get("opsi_jawaban", [])
+        options_dict_list = []
         for opt in options_raw:
             if isinstance(opt, dict):
-                labeled_options.append(f"{opt['label']}. {opt['text']}")
+                options_dict_list.append({"label": opt.get("label", ""), "text": opt.get("text", "")})
             else:
-                labeled_options.append(f"{opt.label}. {opt.text}")
-
-        # Resolve full answer string (e.g. "A. Menurunkan demam")
-        correct_label = q.get("jawaban_benar", "A")
+                options_dict_list.append({"label": getattr(opt, "label", ""), "text": getattr(opt, "text", "")})
+        
+        options_str_list = [f"{opt['label']}. {opt['text']}" for opt in options_dict_list]
+        correct_label = item.get("jawaban_benar", "A")
         full_answer = correct_label
-        for opt_str in labeled_options:
+        for opt_str in options_str_list:
             if opt_str.startswith(f"{correct_label}."):
                 full_answer = opt_str
                 break
-
-        # Flatten pembahasan list into a single explanation string
-        pembahasan = q.get("pembahasan", [])
-        if isinstance(pembahasan, list):
-            explanation = " ".join(pembahasan)
-        else:
-            explanation = str(pembahasan)
-
-        frontend_questions.append({
-            "question": q.get("pertanyaan", ""),
-            "options": labeled_options,
+                
+        pembahasan = item.get("pembahasan", [])
+        explanation = " ".join(pembahasan) if isinstance(pembahasan, list) else str(pembahasan)
+        
+        mapped_questions.append({
+            "question_text": item.get("pertanyaan", ""),
+            "question": item.get("pertanyaan", ""),
+            "options": options_dict_list,
+            "options_labeled": options_str_list,
+            "correct_answer": correct_label,
             "answer": full_answer,
             "explanation": explanation,
-            "penjelasan_salah": q.get("penjelasan_salah", ""),
+            "penjelasan_salah": item.get("penjelasan_salah", ""),
+            "id_soal": item.get("id_soal", f"Q-{i+1:02d}"),
+            "tingkat_kesulitan": item.get("tingkat_kesulitan", "Menengah")
         })
-
     return {
-        "topik": topic if topic else "Tanaman Obat & Kimia Farmasi",
-        "daftar_soal": [q.model_dump() if not isinstance(q, dict) else q for q in source],
-        "analisis_performa": analisis_performa_data,
-        "questions": frontend_questions,
+        "topik": validated_quiz_dict.get("topik", ""),
+        "daftar_soal": source_questions,
+        "analisis_performa": validated_quiz_dict.get("analisis_performa", {}),
+        "questions": mapped_questions
     }
 
 
+def _generate_synthetic_quiz(topic: str, jumlah_soal: int) -> dict[str, Any]:
+    logger.warning(
+        f"SYNTHETIC FALLBACK TRIGGERED for topic='{topic[:50]}'. "
+        f"Generating completely dynamic {jumlah_soal} template quiz array rows."
+    )
+    
+    _POOL = [
+        {
+            "tingkat_kesulitan": "Mudah",
+            "pertanyaan": f"Manakah dari pernyataan berikut yang paling tepat menggambarkan fokus utama studi fitokimia terkait ekstrak herbal \"{topic}\"?",
+            "opsi_jawaban": [
+                {"label": "A", "text": "Isolasi dan karakterisasi senyawa metabolit sekunder bioaktif."},
+                {"label": "B", "text": "Penghitungan kadar air permukaan tanah perkebunan makro."},
+                {"label": "C", "text": "Analisis rantai pasok dan distribusi makro ekonomi global."},
+                {"label": "D", "text": "Klasifikasi morfologi luar rumpun kingdom hewan vertebrata."},
+            ],
+            "jawaban_benar": "A",
+            "pembahasan": [
+                f"Studi fitokimia pada komoditas \"{topic}\" berfokus pada pemisahan, pemurnian, dan identifikasi molekul aktif (metabolit sekunder) seperti alkaloid, flavonoid, dan saponin.",
+            ],
+            "penjelasan_salah": "Opsi B, C, dan D salah karena aspek perkebunan, makro ekonomi, dan zoologi bukan bagian dari ruang lingkup analisis fitokimia bahan alam laboratorium."
+        },
+        {
+            "tingkat_kesulitan": "Menengah",
+            "pertanyaan": f"Senyawa penanda aktif (marker compound) manakah yang menjadi parameter standardisasi QC klinis utama pada tanaman obat tradisional golongan \"{topic}\"?",
+            "opsi_jawaban": [
+                {"label": "A", "text": f"Senyawa metabolit sekunder spesifik (seperti flavonoid/glikosida pada \"{topic}\")."},
+                {"label": "B", "text": "Glukosa rantai lurus jenuh bebas struktural"},
+                {"label": "C", "text": "Asam amino penyusun struktur dinding sel selulosa"},
+                {"label": "D", "text": "Kandungan mineral garam natrium klorida eksternal bumi"},
+            ],
+            "jawaban_benar": "A",
+            "pembahasan": [
+                f"Standardisasi sediaan herbal \"{topic}\" mewajibkan pengukuran kadar kandungan senyawa penanda (marker) bioaktif untuk menjamin konsistensi efikasi terapeutik antar sediaan.",
+            ],
+            "penjelasan_salah": "Opsi B, C, dan D salah karena mineral bumi, asam amino selulosa, dan glukosa bebas bersifat umum dan tidak dapat dijadikan penanda unik sediaan fito-farmaka."
+        },
+        {
+            "tingkat_kesulitan": "HOTS",
+            "pertanyaan": f"Jika sediaan ekstrak kental tanaman obat \"{topic}\" menunjukkan efek sinergis positif saat dikombinasikan dengan terapia konvensional, parameter farmakokinetik apa yang paling kritis untuk dipantau?",
+            "opsi_jawaban": [
+                {"label": "A", "text": "Modulasi aktivitas enzim metabolisme sitokrom P450 di organ hepar."},
+                {"label": "B", "text": "Peningkatan ekskresi air seni melalui filtrasi glomerulus renal."},
+                {"label": "C", "text": "Kecepatan disintegrasi fisik struktur tablet di lambung."},
+                {"label": "D", "text": "Perubahan tingkat sensitivitas indra pengecap mukosa lidah."},
+            ],
+            "jawaban_benar": "A",
+            "pembahasan": [
+                f"Sinergisme obat-herbal \"{topic}\" sangat dipengaruhi oleh proses ADME. Penghambatan atau induksi enzim sitokrom P450 dapat mengubah kadar plasma obat konvensional secara signifikan.",
+            ],
+            "penjelasan_salah": "Opsi B, C, dan D kurang tepat karena disintegrasi lambung, indra pengecap, dan filtrasi ginjal bukan merupakan jalur utama modulasi sinergisme farmakokinetik molekular."
+        }
+    ]
+
+    selected_questions = []
+    for i in range(jumlah_soal):
+        tpl = _POOL[i % len(_POOL)].copy()
+        tpl["id_soal"] = f"Q-{i+1:02d}"
+        tpl["opsi_jawaban"] = [opt.copy() for opt in tpl["opsi_jawaban"]]
+        selected_questions.append(tpl)
+
+    analisis_performa_data = {
+        "sorotan": [
+            f"Mampu memetakan ruang lingkup fitokimia dasar komoditas {topic}.",
+            "Mengidentifikasi pentingnya penanda aktif (marker) dalam standardisasi simplisia."
+        ],
+        "area_fokus": [
+            "Perlu memperdalam jalur metabolisme ADME dan interaksi enzim sitokrom P450.",
+            "Disarankan meninjau kembali regulasi standardisasi sediaan ekstrak herbal."
+        ]
+    }
+    
+    internal_quiz = {
+        "topik": topic if topic else "Tanaman Obat & Kimia Farmasi",
+        "daftar_soal": selected_questions,
+        "analisis_performa": analisis_performa_data,
+    }
+
+    logger.info(f"Synthetic quiz generated: {len(selected_questions)} soal, topik='{topic}'.")
+    return _map_to_frontend_payload(internal_quiz, jumlah_soal)
+
+
 # ═══════════════════════════════════════════
-# MAIN PUBLIC FUNCTION
+# MAIN INTERACTIVE QUIZ TOOL ENDPOINT
 # ═══════════════════════════════════════════
 
 def generate_interactive_quiz_tool(
@@ -978,28 +659,6 @@ def generate_interactive_quiz_tool(
     file_context: Optional[str] = None,
     model: Optional[str] = None,
 ) -> dict[str, Any]:
-    """
-    Generate kuis interaktif — robust, fault-tolerant, never-crash pipeline.
-
-    Pipeline:
-    1. NLP Preprocessing: Clean topic, extract jumlah_soal from raw prompt.
-    2. Adaptive Retrieval: Specific vs. broad context fetching.
-    3. Scope-Aware Prompt: Dynamic system prompt based on topic scope.
-    4. LLM Call: Tool-calling with forced schema.
-    5. Multi-Layer Parse: tool_calls -> regex -> synthetic fallback.
-    6. Pydantic Validation: Final schema check.
-
-    Args:
-        topic: Raw topic/prompt dari pengguna.
-        jumlah_soal: Jumlah soal default (override jika terdeteksi di prompt).
-        ai_mode: Persona AI target (default: Pelajar).
-        file_context: Teks dari file upload pengguna (opsional).
-        model: Model LLM yang sudah tervalidasi berdasarkan role (opsional).
-
-    Returns:
-        Dict berisi quiz data sesuai QuizResponse schema.
-        NEVER raises — always returns a valid quiz payload.
-    """
     logger.info(
         f"Quiz pipeline started: raw_topic='{topic[:60]}', "
         f"jumlah_soal={jumlah_soal}, mode={ai_mode}"
@@ -1020,8 +679,7 @@ def generate_interactive_quiz_tool(
         context_data, is_broad, graph_available = _retrieve_quiz_context(cleaned_topic)
     except Exception as e:
         logger.error(
-            f"Retrieval pipeline crashed: {e}. "
-            "Falling back to general corpus.",
+            f"Retrieval pipeline crashed: {e}. Falling back to general corpus.",
             exc_info=True,
         )
         domain = _detect_broad_domain(cleaned_topic)
@@ -1031,15 +689,10 @@ def generate_interactive_quiz_tool(
         graph_available = False
 
     # ── Step 2b: Hard String Truncation ──
-    # Cap context to max 4000 chars to guarantee the total request input
-    # (system prompt + user message + tool schema) never approaches the
-    # model's strict 8193 token boundary.
     _MAX_CONTEXT_CHARS = 4000
     if len(context_data) > _MAX_CONTEXT_CHARS:
         logger.warning(
-            f"Context too long ({len(context_data)} chars), "
-            f"truncating to {_MAX_CONTEXT_CHARS} chars to avoid "
-            f"exceeding model context window."
+            f"Context too long ({len(context_data)} chars), truncating to {_MAX_CONTEXT_CHARS} chars."
         )
         context_data = context_data[:4000]
 
@@ -1059,148 +712,50 @@ def generate_interactive_quiz_tool(
         graph_available=graph_available,
         file_context=file_context,
     )
-    tools = _build_tool_schema()
+    tools = _build_tool_schema(jumlah_soal)
 
-    # ── Step 4: LLM Call ──
+    # ── Step 4: Secure LLM Call ──
     resolved_model = model or settings.LLM_DEFAULT_MODEL
     try:
+        logger.info(f"Invoking HuggingFace completions API natively with model instance: {resolved_model}")
         response = _client.chat.completions.create(
             model=resolved_model,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Buat kuis {jumlah_soal} soal tentang: {cleaned_topic}"},
+                {"role": "user", "content": f"Hasilkan objek JSON kuis murni berisi TEPAT {jumlah_soal} soal tentang materi: {cleaned_topic}. Output harus berupa JSON valid sesuai dengan instruksi system."},
             ],
-            tools=tools,
-            tool_choice={
-                "type": "function",
-                "function": {"name": "render_interactive_quiz"},
-            },
             temperature=0.2,
-            max_tokens=1200,
+            max_tokens=3000,
         )
     except Exception as e:
         logger.error(
-            f"LLM API call failed: {e}. Triggering synthetic fallback.",
+            f"LLM API call failed with exception: {e}. Triggering dynamic synthetic fallback.",
             exc_info=True,
         )
         return _generate_synthetic_quiz(cleaned_topic, jumlah_soal)
 
-    # ── Step 5: Multi-Layer Parsing ──
+    # ── Step 5: Multi-Layer Parsing Layer ──
     message = response.choices[0].message
-
-    # Check 1: Formal tool_calls
     raw_arguments = _parse_tool_calls(message)
 
-    # Check 2: Regex JSON extraction from content
     if raw_arguments is None:
-        logger.info("tool_calls parse failed/empty, trying regex extraction...")
+        logger.info("Formal tool_calls failed or returned empty. Running regex parser layer...")
         raw_arguments = _parse_content_regex(message)
 
-    # Check 3: Synthetic fallback
     if raw_arguments is None:
-        logger.warning(
-            "All LLM parsing methods failed. Triggering synthetic fallback."
-        )
+        logger.warning("All LLM JSON parsing channels failed. Triggering synthetic fallback.")
         return _generate_synthetic_quiz(cleaned_topic, jumlah_soal)
 
     # ── Step 5b: HARD PYTHON INTERCEPTOR FOR ZERO QUESTIONS ──
-    # Prevents empty quiz payloads from reaching validation/frontend.
-    # Directly injects high-quality preset questions if LLM returned 0 questions.
     if (
         not isinstance(raw_arguments, dict)
         or not raw_arguments.get("daftar_soal")
         or len(raw_arguments.get("daftar_soal", [])) == 0
     ):
         logger.warning(
-            f"ZERO-QUESTION INTERCEPTOR TRIGGERED: LLM returned empty daftar_soal. "
-            f"Injecting 3 preset educational questions about Indonesian herbs."
+            f"ZERO-QUESTION INTERCEPTOR TRIGGERED. Injecting dynamic {jumlah_soal} preset questions."
         )
-        # Hard override with educational preset questions
-        if not isinstance(raw_arguments, dict):
-            raw_arguments = {}
-        raw_arguments["topik"] = raw_arguments.get("topik", cleaned_topic)
-        raw_arguments["daftar_soal"] = [
-            {
-                "id_soal": "S1",
-                "tingkat_kesulitan": "Umum",
-                "pertanyaan": (
-                    "Tanaman obat herbal Indonesia yang terkenal memiliki kandungan "
-                    "senyawa kurkumin dan berfungsi menjaga fungsi hati (hepatoprotektor) adalah..."
-                ),
-                "opsi_jawaban": [
-                    {"label": "A", "text": "Temulawak (Curcuma xanthorrhiza)"},
-                    {"label": "B", "text": "Sambiloto (Andrographis paniculata)"},
-                    {"label": "C", "text": "Mahkota Dewa (Phaleria macrocarpa)"},
-                    {"label": "D", "text": "Daun Sirih (Piper betle)"},
-                ],
-                "jawaban_benar": "A",
-                "pembahasan": [
-                    "Temulawak (Curcuma xanthorrhiza) kaya akan senyawa kurkuminoid "
-                    "yang terbukti secara klinis mampu melindungi sel hati dari kerusakan.",
-                    "Kurkumin bekerja dengan meningkatkan aktivitas enzim antioksidan "
-                    "dan menghambat produksi radikal bebas yang merusak hepatosit.",
-                ],
-                "penjelasan_salah": "Sambiloto, Mahkota Dewa, dan Daun Sirih tidak dikenal secara utama mengandung kurkuminoid sebagai pelindung hati.",
-            },
-            {
-                "id_soal": "S2",
-                "tingkat_kesulitan": "Umum",
-                "pertanyaan": (
-                    "Senyawa aktif utama yang memberikan rasa pahit ekstrim sekaligus "
-                    "khasiat imunomodulator pada tanaman Sambiloto adalah..."
-                ),
-                "opsi_jawaban": [
-                    {"label": "A", "text": "Piperin"},
-                    {"label": "B", "text": "Andrographolide"},
-                    {"label": "C", "text": "Alisin"},
-                    {"label": "D", "text": "Kurkumin"},
-                ],
-                "jawaban_benar": "B",
-                "pembahasan": [
-                    "Andrographolide merupakan senyawa lakton diterpenoid yang menjadi "
-                    "marker utama khasiat medis pada tanaman Sambiloto.",
-                    "Senyawa ini memodulasi sistem imun dengan meningkatkan proliferasi "
-                    "limfosit T dan aktivitas sel NK (Natural Killer).",
-                ],
-                "penjelasan_salah": "Piperin, Alisin, dan Kurkumin bukan merupakan marker aktif pahit utama pembawa khasiat imunomodulator pada Sambiloto.",
-            },
-            {
-                "id_soal": "S3",
-                "tingkat_kesulitan": "Menengah",
-                "pertanyaan": (
-                    "Metode ekstraksi yang paling umum digunakan untuk mengekstrak "
-                    "senyawa bioaktif polar (seperti flavonoid glikosida) dari tanaman obat adalah..."
-                ),
-                "opsi_jawaban": [
-                    {"label": "A", "text": "Maserasi dengan n-heksana"},
-                    {"label": "B", "text": "Maserasi dengan etanol 70%"},
-                    {"label": "C", "text": "Destilasi uap"},
-                    {"label": "D", "text": "Perkolasi dengan petroleum eter"},
-                ],
-                "jawaban_benar": "B",
-                "pembahasan": [
-                    "Etanol 70% merupakan pelarut semi-polar yang efektif mengekstrak "
-                    "senyawa polar seperti flavonoid glikosida, tanin, dan saponin.",
-                    "Konsentrasi 70% dipilih karena kandungan air membantu penetrasi ke "
-                    "dalam sel tumbuhan dan meningkatkan kelarutan senyawa polar.",
-                ],
-                "penjelasan_salah": "Maserasi dengan n-heksana, destilasi uap, dan perkolasi dengan petroleum eter digunakan untuk ekstraksi senyawa non-polar atau minyak atsiri.",
-            },
-        ]
-        raw_arguments["analisis_performa"] = {
-            "sorotan": [
-                "Memahami khasiat hepatoprotektor Temulawak.",
-                "Mengidentifikasi marker aktif imunomodulator Sambiloto."
-            ],
-            "area_fokus": [
-                "Perlu mempelajari metode ekstraksi senyawa polar dan non-polar lebih lanjut.",
-                "Disarankan memahami perbedaan senyawa penanda (marker) pada simplisia herbal."
-            ]
-        }
-        logger.info(
-            f"Injected {len(raw_arguments['daftar_soal'])} preset questions "
-            f"for topic '{cleaned_topic[:40]}'"
-        )
+        return _generate_synthetic_quiz(cleaned_topic, jumlah_soal)
 
     # ── Step 5c: Self-Healing Defaults for Missing Schema Fields ──
     if isinstance(raw_arguments, dict):
@@ -1216,84 +771,41 @@ def generate_interactive_quiz_tool(
                 ]
             }
         if "daftar_soal" in raw_arguments and isinstance(raw_arguments["daftar_soal"], list):
+            raw_arguments["daftar_soal"] = raw_arguments["daftar_soal"][:jumlah_soal]
             for q in raw_arguments["daftar_soal"]:
                 if isinstance(q, dict) and "penjelasan_salah" not in q:
                     q["penjelasan_salah"] = "Opsi lainnya kurang sesuai dengan konteks atau fakta ilmiah yang ditanyakan."
 
-    # ── Step 6: Pydantic Validation ──
+    # ── Step 6: Final Pydantic Validation & Payload Mapping ──
     try:
         validated_quiz = QuizResponse.model_validate(raw_arguments)
-
-        # ── Step 6b: Empty Questions Array Guard ──
-        # If LLM returned a valid structure but with 0 questions (empty
-        # daftar_soal), intercept and fall back to synthetic generation
-        # instead of sending a blank payload to the frontend.
-        if not validated_quiz.daftar_soal or len(validated_quiz.daftar_soal) == 0:
-            logger.warning(
-                "LLM returned valid JSON but with 0 questions "
-                "(empty daftar_soal). Triggering synthetic fallback."
-            )
-            return _generate_synthetic_quiz(cleaned_topic, jumlah_soal)
-
         logger.info(
-            f"Quiz generated successfully: "
-            f"{len(validated_quiz.daftar_soal)} soal, "
-            f"topik='{validated_quiz.topik}', "
-            f"scope={'broad' if is_broad else 'specific'}."
+            f"Quiz generated successfully from HuggingFace pipeline: {len(validated_quiz.daftar_soal)} soal."
         )
-        return validated_quiz.model_dump()
+        return _map_to_frontend_payload(validated_quiz.model_dump(), jumlah_soal)
     except Exception as e:
-        logger.warning(
-            f"Pydantic validation failed: {e}. "
-            "Checking if raw JSON is usable...",
-            exc_info=True,
-        )
-        # If raw JSON has the minimum required structure, clean and return it
+        logger.warning(f"Pydantic schema validation failed: {e}. Resolving dictionary raw structures...", exc_info=True)
         if (
             isinstance(raw_arguments, dict)
             and "daftar_soal" in raw_arguments
             and isinstance(raw_arguments["daftar_soal"], list)
             and len(raw_arguments["daftar_soal"]) > 0
         ):
-            # ── Filter out malformed question items ──
-            # Drop any question that lacks critical fields or has empty pertanyaan
             questions_list = raw_arguments["daftar_soal"]
             cleaned_questions = [
                 q for q in questions_list
                 if isinstance(q, dict)
                 and q.get("pertanyaan")
-                and isinstance(q.get("pertanyaan"), str)
-                and q.get("pertanyaan").strip()
                 and q.get("id_soal")
                 and q.get("opsi_jawaban")
             ]
 
-            # Check if we have at least 3 valid questions after filtering
-            if len(cleaned_questions) < 3:
-                logger.warning(
-                    f"After filtering malformed questions, only {len(cleaned_questions)} "
-                    f"valid questions remain (minimum required: 3). "
-                    "Triggering synthetic fallback."
-                )
+            if len(cleaned_questions) == 0:
                 return _generate_synthetic_quiz(cleaned_topic, jumlah_soal)
 
-            # Update raw_arguments with cleaned questions
-            raw_arguments["daftar_soal"] = cleaned_questions
-
-            logger.info(
-                f"Returning cleaned raw quiz data with {len(cleaned_questions)} "
-                f"valid questions (filtered from {len(questions_list)} raw items)."
-            )
-
-            # Ensure topik field exists
+            raw_arguments["daftar_soal"] = cleaned_questions[:jumlah_soal]
             if "topik" not in raw_arguments:
                 raw_arguments["topik"] = cleaned_topic
+            return _map_to_frontend_payload(raw_arguments, jumlah_soal)
 
-            return raw_arguments
-
-        # Absolute last resort
-        logger.warning(
-            "Raw JSON structure is also broken. "
-            "Triggering synthetic fallback as last resort."
-        )
         return _generate_synthetic_quiz(cleaned_topic, jumlah_soal)
