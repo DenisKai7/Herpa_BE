@@ -5,7 +5,7 @@ Menggabungkan dua paradigma pencarian:
 1. Cosine Similarity (Semantic Search): Menggunakan pgvector di Supabase
    untuk menemukan dokumen yang secara semantik mirip dengan query.
 2. Graph Traversal (Relational Search): Menggunakan Cypher di Neo4j
-   untuk menemukan relasi antar entitas (compounds, symptoms, drugs).
+   untuk menemukan relasi antar entitas (herbs, compounds).
 
 Setiap intent memiliki retriever khusus:
 - konsultasi: tanaman obat berdasarkan gejala + relasi compound/drug.
@@ -120,7 +120,7 @@ def _format_records_to_text(
 
 def content_based_recommendation(query: str, limit: int = 5) -> str:
     """
-    Hybrid search untuk intent 'konsultasi' dengan pencarian gejala dan multi-label.
+    Hybrid search untuk intent 'konsultasi' dengan pencarian keyword pada Herb & Compound.
     """
     # ── STEP 1: Vector Search ──
     vector_results = _vector_search(query, "plants", "match_plants", limit)
@@ -143,18 +143,15 @@ def content_based_recommendation(query: str, limit: int = 5) -> str:
             cleaned_words = [query.lower()] if query else [""]
 
     cypher = """
-    MATCH (p)-[:TREATS]->(s:Symptom)
-    WHERE (p:Plant OR p:Herb)
-      AND (any(w IN $words WHERE toLower(s.name) CONTAINS w OR w CONTAINS toLower(s.name))
-       OR any(w IN $words WHERE toLower(p.name) CONTAINS w OR w CONTAINS toLower(p.name))
-       OR toLower(s.name) CONTAINS toLower($query)
-       OR toLower(p.name) CONTAINS toLower($query))
-    OPTIONAL MATCH (p)-[:HAS_COMPOUND]->(c:Compound)
-    OPTIONAL MATCH (c)-[:INTERACTS_WITH]->(d:Drug)
-    RETURN p.name AS tanaman, p.nama_latin AS nama_latin,
-           collect(DISTINCT s.name) AS gejala_terkait,
+    MATCH (h:Herb)
+    WHERE any(w IN $words WHERE toLower(h.name) CONTAINS w OR toLower(h.description) CONTAINS w)
+       OR toLower(h.name) CONTAINS toLower($query)
+       OR toLower(h.description) CONTAINS toLower($query)
+    OPTIONAL MATCH (h)-[:HAS_COMPOUND]->(c:Compound)
+    RETURN h.name AS tanaman,
+           h.name AS nama_latin,
            collect(DISTINCT c.name) AS senyawa_aktif,
-           collect(DISTINCT d.name) AS interaksi_obat
+           [] AS interaksi_obat
     LIMIT 5
     """
     graph_results = _graph_search(query, cypher, words=cleaned_words)
