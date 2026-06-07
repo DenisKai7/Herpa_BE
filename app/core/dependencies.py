@@ -30,6 +30,13 @@ ROLE_ALLOWED_MODELS: dict[str, list[str]] = {
     "peneliti": [settings.MODEL_MEDIS_1, settings.MODEL_MEDIS_2],
     "pelajar": [settings.MODEL_PELAJAR_1, settings.MODEL_PELAJAR_2],
     "umum": [settings.MODEL_UMUM],
+    "user": [
+        settings.MODEL_UMUM,
+        settings.MODEL_PELAJAR_1,
+        settings.MODEL_PELAJAR_2,
+        settings.MODEL_MEDIS_1,
+        settings.MODEL_MEDIS_2,
+    ],
 }
 
 # Maps role → default model (first in allowed list)
@@ -38,6 +45,7 @@ ROLE_DEFAULT_MODEL: dict[str, str] = {
     "peneliti": settings.MODEL_MEDIS_1,
     "pelajar": settings.MODEL_PELAJAR_1,
     "umum": settings.MODEL_UMUM,
+    "user": settings.MODEL_UMUM,
 }
 
 
@@ -46,9 +54,10 @@ def resolve_model_for_role(role: str, model_choice: Optional[str] = None) -> str
     Validasi dan resolusi model berdasarkan role user.
 
     Guardrail logic:
-    - Jika model_choice kosong/None → gunakan default model untuk role.
-    - Jika model_choice ada tapi tidak termasuk allowed list role → fallback ke default.
-    - Jika model_choice valid untuk role → gunakan model_choice.
+    - Jika model_choice kosong/None -> gunakan default model untuk role.
+    - Jika model_choice ada di config -> gunakan model_choice (bypass role-gating).
+    - Jika model_choice ada tapi tidak termasuk allowed list role -> fallback ke default.
+    - Jika model_choice valid untuk role -> gunakan model_choice.
 
     Args:
         role: Role user dari tabel profiles (tenaga_medis/peneliti/pelajar/umum).
@@ -66,6 +75,24 @@ def resolve_model_for_role(role: str, model_choice: Optional[str] = None) -> str
             f"using default: {default_model}"
         )
         return default_model
+
+    model_choice_stripped = model_choice.strip()
+    configured_models = {
+        settings.LLM_DEFAULT_MODEL,
+        settings.MODEL_MEDIS_1,
+        settings.MODEL_MEDIS_2,
+        settings.MODEL_PELAJAR_1,
+        settings.MODEL_PELAJAR_2,
+        settings.MODEL_UMUM,
+        settings.VLM_MODEL,
+    }
+
+    if model_choice_stripped in configured_models:
+        logger.info(
+            f"Model '{model_choice_stripped}' is configured in settings. "
+            f"Bypassing role-gating for role '{role}'."
+        )
+        return model_choice_stripped
 
     if model_choice in allowed_models:
         logger.info(

@@ -42,6 +42,18 @@ class QuizQuestion(BaseModel):
     penjelasan_salah: str = Field(
         description="Penjelasan singkat mengapa pilihan jawaban lainnya salah atau jebakan yang sering terjadi"
     )
+    level_kognitif: str = Field(
+        default="Memahami",
+        description="Level kognitif Taksonomi Bloom, misal: Mengingat, Memahami, Menerapkan, Menganalisis, Mengevaluasi"
+    )
+    jenis_soal: str = Field(
+        default="Konsep",
+        description="Jenis pertanyaan kuis, misal: sebab-akibat, perbandingan, studi kasus, dll."
+    )
+    subtopik: str = Field(
+        default="Umum",
+        description="Subtopik spesifik dari soal"
+    )
 
 
 class PerformanceAnalysis(BaseModel):

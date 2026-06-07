@@ -149,13 +149,21 @@ def _process_query_sync(
     # ── QUIZ INTENT: Agentic Tool-Calling ──
     if intent == "generate_quiz":
         try:
-            quiz_data = generate_interactive_quiz_tool(
-                topic=query,
-                jumlah_soal=3,
-                ai_mode=ai_mode,
-                file_context=file_data_content,
-                model=model,
-            )
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                quiz_data = loop.run_until_complete(
+                    generate_interactive_quiz_tool(
+                        topic=query,
+                        jumlah_soal=3,
+                        ai_mode=ai_mode,
+                        file_context=file_data_content,
+                        model=model,
+                    )
+                )
+            finally:
+                loop.close()
             return {
                 "intent_detected": "quiz_rendered",
                 "quiz_payload": quiz_data,
@@ -280,13 +288,21 @@ def _stream_query_sync(
     # ── QUIZ: Return full payload (tidak di-stream) ──
     if intent == "generate_quiz":
         try:
-            quiz_data = generate_interactive_quiz_tool(
-                topic=query,
-                jumlah_soal=3,
-                ai_mode=ai_mode,
-                file_context=file_data_content,
-                model=model,
-            )
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                quiz_data = loop.run_until_complete(
+                    generate_interactive_quiz_tool(
+                        topic=query,
+                        jumlah_soal=3,
+                        ai_mode=ai_mode,
+                        file_context=file_data_content,
+                        model=model,
+                    )
+                )
+            finally:
+                loop.close()
             yield {
                 "event": "quiz",
                 "data": {

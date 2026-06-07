@@ -77,6 +77,12 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info("=" * 60)
 
+    try:
+        from app.agent.quiz_generator import log_startup
+        log_startup()
+    except Exception as e:
+        logger.warning(f"Failed to trigger quiz generator startup logs: {e}")
+
     redis_connection = None
 
     # ── Redis Rate Limiter ──
