@@ -43,13 +43,32 @@ class Settings(BaseSettings):
 
     # ─── LLM (via HuggingFace Inference API) ───
     LLM_BASE_URL: str = "https://router.huggingface.co/v1"
-    LLM_DEFAULT_MODEL: str = "meta-llama/Llama-3.1-8B-Instruct"
+    HF_PROVIDER: str = "auto"
 
-    # ─── ROLE-BASED MODEL SELECTION ───
+    # ─── DUA MODEL YANG TERSEDIA ───
+    MODEL_FAST: str = "meta-llama/Llama-3.1-8B-Instruct"
+    MODEL_THINKING: str = "Qwen/Qwen2.5-7B-Instruct"
+
+    LLM_DEFAULT_MODEL: str = "meta-llama/Llama-3.1-8B-Instruct"
+    LLM_FALLBACK_MODEL: str = "Qwen/Qwen2.5-7B-Instruct"
+
+    # ─── GENERATION ───
+    FAST_MAX_TOKENS: int = 1000
+    THINKING_MAX_TOKENS: int = 2200
+
+    FAST_TEMPERATURE: float = 0.35
+    THINKING_TEMPERATURE: float = 0.25
+
+    MODEL_REQUEST_TIMEOUT_SECONDS: int = 90
+    MODEL_MAX_RETRIES: int = 2
+    ALLOW_MODEL_FALLBACK: bool = True
+    MODEL_HEALTHCHECK_ENABLED: bool = True
+
+    # ─── DEPRECATED ROLE-BASED MODEL SELECTION (BACKWARD COMPATIBILITY) ───
     MODEL_MEDIS_1: str = "Qwen/Qwen2.5-7B-Instruct"
-    MODEL_MEDIS_2: str = "Qwen/Qwen2.5-14B-Instruct"
-    MODEL_PELAJAR_1: str = "google/gemma-2-9b-it"
-    MODEL_PELAJAR_2: str = "google/gemma-2-27b-it"
+    MODEL_MEDIS_2: str = "Qwen/Qwen2.5-7B-Instruct"
+    MODEL_PELAJAR_1: str = "meta-llama/Llama-3.1-8B-Instruct"
+    MODEL_PELAJAR_2: str = "Qwen/Qwen2.5-7B-Instruct"
     MODEL_UMUM: str = "meta-llama/Llama-3.1-8B-Instruct"
 
     # ─── VLM MODEL (via Groq Cloud) ───

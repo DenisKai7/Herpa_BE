@@ -1,15 +1,5 @@
 """
 Chat API - Endpoints untuk chat messaging dan manajemen sesi chat.
-
-Fitur:
-- Blocking message: Response AI lengkap sekaligus.
-- Streaming message: Server-Sent Events (SSE) token-by-token.
-- Manajemen chat: rename, pin, share, delete, list, history.
-- Public shared chat: read-only tanpa autentikasi.
-
-Keamanan:
-- Semua endpoint (kecuali public) dilindungi oleh JWT verification.
-- User hanya bisa mengakses chat miliknya sendiri (ownership check).
 """
 
 import json
@@ -21,11 +11,40 @@ from fastapi.responses import StreamingResponse
 
 from app.agent.orchestrator import process_user_query, process_user_query_stream
 from app.core.database import supabase
-from app.core.dependencies import verify_user, verify_user_with_role, resolve_model_for_role
+from app.core.dependencies import verify_user, verify_user_with_role, resolve_model_for_role, resolve_model, ModelTier
 from app.models.schemas import ChatActionRequest, ChatRequest, ChatResponse
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+# ═══════════════════════════════════════════
+# HELPER: Error Classification
+# ═══════════════════════════════════════════
+
+def classify_provider_error(exc: Exception) -> str:
+    message = str(exc).lower()
+
+    if "model_not_supported" in message:
+        return "model_not_supported"
+
+    if "not supported by any provider" in message:
+        return "model_not_supported"
+
+    if "429" in message or "rate limit" in message:
+        return "rate_limited"
+
+    if "timeout" in message:
+        return "timeout"
+
+    if "401" in message:
+        return "authentication_failed"
+
+    if "403" in message:
+        return "access_denied"
+
+    return "provider_error"
 
 
 # ═══════════════════════════════════════════
@@ -33,20 +52,7 @@ router = APIRouter()
 # ═══════════════════════════════════════════
 
 def _verify_chat_ownership(chat_id: str, user_id: str) -> dict[str, Any]:
-    """
-    Memverifikasi bahwa chat_id milik user_id.
-
-    Args:
-        chat_id: UUID chat session.
-        user_id: UUID user yang terautentikasi.
-
-    Returns:
-        Data chat record jika valid.
-
-    Raises:
-        HTTPException 404: Jika chat tidak ditemukan.
-        HTTPException 403: Jika chat bukan milik user.
-    """
+    """Memverifikasi bahwa chat_id milik user_id."""
     try:
         result = (
             supabase.table("chats")
@@ -78,26 +84,9 @@ def _save_messages_to_db(
     file_url: Optional[str] = None,
     file_name: Optional[str] = None,
     file_type: Optional[str] = None,
+    execution_metadata: Optional[dict[str, Any]] = None,
 ) -> str:
-    """
-    Menyimpan pesan user dan AI response ke database.
-
-    Jika chat_id belum ada, buat chat session baru terlebih dahulu.
-
-    Args:
-        chat_id: UUID chat session (None = buat baru).
-        user_id: UUID user pemilik chat.
-        user_message: Pesan asli dari pengguna.
-        ai_content: Respons AI (teks atau JSON quiz).
-        is_quiz: True jika response adalah quiz payload.
-        intent: Intent yang terdeteksi oleh NLU.
-        file_url: URL file upload (opsional).
-        file_name: Nama file asli (opsional).
-        file_type: MIME type file (opsional).
-
-    Returns:
-        chat_id (str): UUID chat session (baru atau existing).
-    """
+    """Menyimpan pesan user dan AI response ke database."""
     if not chat_id:
         chat_data = (
             supabase.table("chats")
@@ -129,7 +118,11 @@ def _save_messages_to_db(
             "chat_id": chat_id,
             "role": "ai",
             "content": ai_content,
-            "metadata": {"is_quiz": is_quiz, "intent": intent},
+            "metadata": {
+                "is_quiz": is_quiz,
+                "intent": intent,
+                **(execution_metadata or {})
+            },
         },
     ]).execute()
 
@@ -153,71 +146,143 @@ async def chat_endpoint(
     req: ChatRequest,
     user_data: dict[str, str] = Depends(verify_user_with_role),
 ) -> ChatResponse:
-    """
-    Endpoint utama untuk mengirim pesan ke AI agent (mode blocking).
-
-    Pipeline:
-    1. Verifikasi JWT token + ambil role via dependency.
-    2. Validasi model_choice berdasarkan role (guardrail).
-    3. Proses query melalui Agentic Pipeline (intent -> retrieval -> LLM).
-    4. Simpan pesan user dan AI response ke database.
-    5. Return structured response.
-
-    Args:
-        req: ChatRequest berisi message, ai_mode, model_choice, dan opsional file_context/chat_id.
-        user_data: Dict berisi user_id dan role dari JWT + profiles (injected by Depends).
-
-    Returns:
-        ChatResponse berisi chat_id, intent, response, dan opsional quiz_data.
-    """
+    """Endpoint utama untuk mengirim pesan ke AI agent (mode blocking)."""
     user_id = user_data["user_id"]
     user_role = user_data["role"]
 
-    try:
-        # Resolve model berdasarkan role + model_choice guardrail
-        resolved_model = resolve_model_for_role(user_role, req.model_choice)
+    # 1. Resolve persona & model tier (support backward compatibility)
+    persona_str = req.persona or req.ai_mode or "umum"
+    # Resolve ModelTier
+    model_tier_str = req.model_tier
+    if not model_tier_str:
+        if req.model_choice:
+            if req.model_choice.lower() in ("fast", "thinking"):
+                model_tier_str = req.model_choice.lower()
+            else:
+                model_tier_str = "thinking" if req.model_choice == settings.MODEL_THINKING else "fast"
+        else:
+            model_tier_str = "thinking" if user_role in ("tenaga_medis", "peneliti") else "fast"
 
-        # Jalankan agentic pipeline
+    # 2. Run agentic pipeline with fallback logic
+    fallback_used = False
+    used_model = settings.MODEL_FAST
+    resolved_model_tier = model_tier_str
+    pipeline_result = None
+
+    try:
         pipeline_result = await process_user_query(
             query=req.message,
-            ai_mode=req.ai_mode,
+            ai_mode=persona_str,
             file_context=req.file_context,
-            model=resolved_model,
+            model=req.model_choice,
+            model_tier=model_tier_str,
         )
-
-        is_quiz = pipeline_result.get("intent_detected") == "quiz_rendered"
-        ai_response_text = pipeline_result["ai_response"]
-        db_content = (
-            json.dumps(pipeline_result["quiz_payload"])
-            if is_quiz
-            else ai_response_text
-        )
-
-        # Simpan ke database
-        chat_id = _save_messages_to_db(
-            chat_id=req.chat_id,
-            user_id=user_id,
-            user_message=req.message,
-            ai_content=db_content,
-            is_quiz=is_quiz,
-            intent=pipeline_result["intent_detected"],
-            file_url=req.file_url,
-            file_name=req.file_name,
-            file_type=req.file_type,
-        )
-
-        return ChatResponse(
-            chat_id=chat_id,
-            intent=pipeline_result["intent_detected"],
-            response=ai_response_text,
-            quiz_data=pipeline_result.get("quiz_payload"),
-        )
-
-    except HTTPException:
-        raise
+        route = pipeline_result.get("model_route")
+        if route:
+            used_model = route.used_model
+            resolved_model_tier = route.model_tier.value
+            fallback_used = route.fallback_used
     except Exception as e:
-        logger.error(f"Chat endpoint error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        error_type = classify_provider_error(e)
+        logger.warning(f"Primary model execution failed: {e}. Error type: {error_type}")
+
+        # Try fallback if allowed
+        if settings.ALLOW_MODEL_FALLBACK:
+            fallback_tier = "thinking" if model_tier_str == "fast" else "fast"
+            fallback_model = settings.MODEL_THINKING if fallback_tier == "thinking" else settings.MODEL_FAST
+            logger.info(f"Attempting fallback to model tier: {fallback_tier} ({fallback_model})")
+            try:
+                pipeline_result = await process_user_query(
+                    query=req.message,
+                    ai_mode=persona_str,
+                    file_context=req.file_context,
+                    model=fallback_model,
+                    model_tier=fallback_tier,
+                )
+                fallback_used = True
+                route = pipeline_result.get("model_route")
+                if route:
+                    used_model = route.used_model
+                    resolved_model_tier = route.model_tier.value
+            except Exception as fallback_exc:
+                logger.error(f"Fallback model also failed: {fallback_exc}", exc_info=True)
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "success": False,
+                        "error": {
+                            "code": "LLM_TEMPORARILY_UNAVAILABLE",
+                            "message": "Layanan AI sedang tidak tersedia. Silakan coba kembali beberapa saat lagi.",
+                            "retryable": True
+                        }
+                    }
+                )
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "success": False,
+                    "error": {
+                        "code": "LLM_TEMPORARILY_UNAVAILABLE",
+                        "message": "Layanan AI sedang tidak tersedia. Silakan coba kembali beberapa saat lagi.",
+                        "retryable": True
+                    }
+                }
+            )
+
+    if not pipeline_result:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "success": False,
+                "error": {
+                    "code": "LLM_TEMPORARILY_UNAVAILABLE",
+                    "message": "Layanan AI sedang tidak tersedia. Silakan coba kembali beberapa saat lagi.",
+                    "retryable": True
+                }
+            }
+        )
+
+    is_quiz = pipeline_result.get("intent_detected") == "quiz_rendered"
+    ai_response_text = pipeline_result["ai_response"]
+    db_content = (
+        json.dumps(pipeline_result["quiz_payload"])
+        if is_quiz
+        else ai_response_text
+    )
+
+    execution_metadata = {
+        "persona": persona_str,
+        "model_tier": resolved_model_tier,
+        "requested_model": req.model_choice,
+        "used_model": used_model,
+        "provider": "hf_router",
+        "fallback_used": fallback_used,
+        "retrieval_used": True,
+        "evidence_level": "mixed"
+    }
+
+    # Simpan ke database
+    chat_id = _save_messages_to_db(
+        chat_id=req.chat_id,
+        user_id=user_id,
+        user_message=req.message,
+        ai_content=db_content,
+        is_quiz=is_quiz,
+        intent=pipeline_result["intent_detected"],
+        file_url=req.file_url,
+        file_name=req.file_name,
+        file_type=req.file_type,
+        execution_metadata=execution_metadata,
+    )
+
+    return ChatResponse(
+        chat_id=chat_id,
+        intent=pipeline_result["intent_detected"],
+        response=ai_response_text,
+        quiz_data=pipeline_result.get("quiz_payload"),
+        metadata=execution_metadata,
+    )
 
 
 @router.post("/message/stream", summary="Kirim pesan ke AI (SSE streaming)")
@@ -225,29 +290,21 @@ async def chat_stream_endpoint(
     req: ChatRequest,
     user_data: dict[str, str] = Depends(verify_user_with_role),
 ) -> StreamingResponse:
-    """
-    Endpoint streaming menggunakan Server-Sent Events (SSE).
-
-    Events yang di-emit:
-    - intent: intent yang terdeteksi oleh NLU.
-    - token: setiap chunk teks dari LLM response.
-    - quiz: payload quiz lengkap (jika intent = generate_quiz).
-    - full_response: response lengkap (untuk disimpan ke DB).
-    - error: pesan error jika terjadi kegagalan.
-    - done: streaming selesai, berisi chat_id.
-
-    Args:
-        req: ChatRequest berisi message, ai_mode, model_choice, dan opsional file_context/chat_id.
-        user_data: Dict berisi user_id dan role dari JWT + profiles (injected by Depends).
-
-    Returns:
-        StreamingResponse dengan media_type text/event-stream.
-    """
+    """Endpoint streaming menggunakan Server-Sent Events (SSE)."""
     user_id = user_data["user_id"]
     user_role = user_data["role"]
 
-    # Resolve model berdasarkan role + model_choice guardrail
-    resolved_model = resolve_model_for_role(user_role, req.model_choice)
+    # Resolve Model & Tier
+    persona_str = req.persona or req.ai_mode or "umum"
+    model_tier_str = req.model_tier
+    if not model_tier_str:
+        if req.model_choice:
+            if req.model_choice.lower() in ("fast", "thinking"):
+                model_tier_str = req.model_choice.lower()
+            else:
+                model_tier_str = "thinking" if req.model_choice == settings.MODEL_THINKING else "fast"
+        else:
+            model_tier_str = "thinking" if user_role in ("tenaga_medis", "peneliti") else "fast"
 
     async def event_generator():
         full_ai_response = ""
@@ -255,13 +312,17 @@ async def chat_stream_endpoint(
         is_quiz = False
         quiz_payload: Optional[dict[str, Any]] = None
         detected_intent = ""
+        used_model = settings.MODEL_FAST
+        resolved_model_tier = model_tier_str
+        fallback_used = False
 
         try:
             async for event in process_user_query_stream(
                 query=req.message,
-                ai_mode=req.ai_mode,
+                ai_mode=persona_str,
                 file_context=req.file_context,
-                model=resolved_model,
+                model=req.model_choice,
+                model_tier=model_tier_str,
             ):
                 event_type = event["event"]
                 event_data = event["data"]
@@ -269,6 +330,11 @@ async def chat_stream_endpoint(
                 if event_type == "intent":
                     detected_intent = event_data
                     yield f"event: intent\ndata: {json.dumps({'intent': event_data})}\n\n"
+
+                elif event_type == "model_route":
+                    used_model = event_data.get("used_model", used_model)
+                    resolved_model_tier = event_data.get("model_tier", resolved_model_tier)
+                    fallback_used = event_data.get("fallback_used", fallback_used)
 
                 elif event_type == "token":
                     full_ai_response += event_data
@@ -284,7 +350,16 @@ async def chat_stream_endpoint(
                     full_ai_response = event_data
 
                 elif event_type == "error":
-                    yield f"event: error\ndata: {json.dumps({'error': event_data})}\n\n"
+                    # Map to a friendly user error
+                    friendly_error = {
+                        "success": False,
+                        "error": {
+                            "code": "LLM_TEMPORARILY_UNAVAILABLE",
+                            "message": "Layanan AI sedang tidak tersedia. Silakan coba kembali beberapa saat lagi.",
+                            "retryable": True
+                        }
+                    }
+                    yield f"event: error\ndata: {json.dumps(friendly_error)}\n\n"
 
                 elif event_type == "done":
                     # Simpan ke database setelah streaming selesai
@@ -294,6 +369,16 @@ async def chat_stream_endpoint(
                             if is_quiz
                             else full_ai_response
                         )
+                        execution_metadata = {
+                            "persona": persona_str,
+                            "model_tier": resolved_model_tier,
+                            "requested_model": req.model_choice,
+                            "used_model": used_model,
+                            "provider": "hf_router",
+                            "fallback_used": fallback_used,
+                            "retrieval_used": True,
+                            "evidence_level": "mixed"
+                        }
                         chat_id = _save_messages_to_db(
                             chat_id=chat_id,
                             user_id=user_id,
@@ -304,6 +389,7 @@ async def chat_stream_endpoint(
                             file_url=req.file_url,
                             file_name=req.file_name,
                             file_type=req.file_type,
+                            execution_metadata=execution_metadata,
                         )
                     except Exception as db_err:
                         logger.error(
@@ -315,7 +401,15 @@ async def chat_stream_endpoint(
 
         except Exception as e:
             logger.error(f"Stream error: {e}", exc_info=True)
-            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+            friendly_error = {
+                "success": False,
+                "error": {
+                    "code": "LLM_TEMPORARILY_UNAVAILABLE",
+                    "message": "Layanan AI sedang tidak tersedia. Silakan coba kembali beberapa saat lagi.",
+                    "retryable": True
+                }
+            }
+            yield f"event: error\ndata: {json.dumps(friendly_error)}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -336,17 +430,7 @@ async def chat_stream_endpoint(
 async def list_user_chats(
     user_id: str = Depends(verify_user),
 ) -> dict[str, Any]:
-    """
-    Mengambil daftar semua chat session milik user yang terautentikasi.
-
-    Diurutkan berdasarkan status pinned (terlebih dahulu) dan waktu update terbaru.
-
-    Args:
-        user_id: UUID user dari JWT (injected by Depends).
-
-    Returns:
-        Dict berisi list chats.
-    """
+    """Mengambil daftar semua chat session milik user."""
     try:
         result = (
             supabase.table("chats")
@@ -367,19 +451,7 @@ async def get_chat_messages(
     chat_id: str,
     user_id: str = Depends(verify_user),
 ) -> dict[str, Any]:
-    """
-    Mengambil seluruh pesan dalam satu chat session, diurutkan kronologis.
-
-    Memverifikasi ownership: hanya pemilik chat yang bisa melihat riwayat.
-
-    Args:
-        chat_id: UUID chat session.
-        user_id: UUID user dari JWT (injected by Depends).
-
-    Returns:
-        Dict berisi list messages.
-    """
-    # Verifikasi kepemilikan
+    """Mengambil seluruh pesan dalam satu chat session."""
     _verify_chat_ownership(chat_id, user_id)
 
     try:
@@ -406,17 +478,7 @@ async def rename_chat(
     req: ChatActionRequest,
     user_id: str = Depends(verify_user),
 ) -> dict[str, Any]:
-    """
-    Mengubah judul chat session.
-
-    Args:
-        chat_id: UUID chat session.
-        req: ChatActionRequest berisi field 'title' baru.
-        user_id: UUID user dari JWT (injected by Depends).
-
-    Returns:
-        Dict konfirmasi dengan judul baru.
-    """
+    """Mengubah judul chat session."""
     if not req.title:
         raise HTTPException(
             status_code=400,
@@ -441,17 +503,7 @@ async def toggle_pin_chat(
     req: ChatActionRequest,
     user_id: str = Depends(verify_user),
 ) -> dict[str, Any]:
-    """
-    Toggle pin status sebuah chat agar muncul di atas sidebar.
-
-    Args:
-        chat_id: UUID chat session.
-        req: ChatActionRequest berisi field 'is_pinned'.
-        user_id: UUID user dari JWT (injected by Depends).
-
-    Returns:
-        Dict konfirmasi dengan status pin terbaru.
-    """
+    """Toggle pin status sebuah chat."""
     if req.is_pinned is None:
         raise HTTPException(
             status_code=400,
@@ -477,17 +529,7 @@ async def toggle_share_chat(
     req: ChatActionRequest,
     user_id: str = Depends(verify_user),
 ) -> dict[str, Any]:
-    """
-    Toggle public visibility. Jika is_public=true, chat bisa diakses via public URL.
-
-    Args:
-        chat_id: UUID chat session.
-        req: ChatActionRequest berisi field 'is_public'.
-        user_id: UUID user dari JWT (injected by Depends).
-
-    Returns:
-        Dict konfirmasi dengan status share dan opsional public_url.
-    """
+    """Toggle public visibility."""
     if req.is_public is None:
         raise HTTPException(
             status_code=400,
@@ -513,18 +555,7 @@ async def toggle_share_chat(
 
 @router.get("/public/{chat_id}", summary="Lihat shared chat (read-only)")
 async def get_public_chat(chat_id: str) -> dict[str, Any]:
-    """
-    Endpoint publik untuk membaca chat yang di-share.
-
-    Tidak memerlukan autentikasi. Hanya menampilkan chat yang
-    memiliki is_public=true.
-
-    Args:
-        chat_id: UUID chat session.
-
-    Returns:
-        Dict berisi title, created_at, dan list messages.
-    """
+    """Endpoint publik untuk membaca chat yang di-share."""
     try:
         chat_info = (
             supabase.table("chats")
@@ -565,18 +596,7 @@ async def delete_chat(
     chat_id: str,
     user_id: str = Depends(verify_user),
 ) -> dict[str, str]:
-    """
-    Menghapus chat session dan semua messages di dalamnya.
-
-    Memverifikasi ownership sebelum menghapus.
-
-    Args:
-        chat_id: UUID chat session.
-        user_id: UUID user dari JWT (injected by Depends).
-
-    Returns:
-        Dict konfirmasi penghapusan.
-    """
+    """Menghapus chat session dan semua messages di dalamnya."""
     _verify_chat_ownership(chat_id, user_id)
 
     try:

@@ -1,25 +1,15 @@
 """
 LLM Formatter - Generates AI responses using HuggingFace Inference API.
-
-Fitur:
-- Dynamic persona-based system prompts untuk personalized responses.
-- STRICT ZERO-HALLUCINATION: AI hanya menjawab berdasarkan database context.
-- Mendukung mode blocking (full response) dan streaming (SSE token-by-token).
-- File context injection untuk multimodal support (OCR result).
-- Menggunakan HuggingFace Inference API via OpenAI-compatible endpoint.
-
-Temperature:
-- 0.0 untuk Tenaga Medis & Peneliti (deterministic, zero creative drift).
-- 0.2 untuk Pelajar & Umum (natural explanation flow).
-- 0.2 untuk quiz generation (sedikit variasi terkontrol).
 """
 
 import logging
-from typing import Generator, Optional
+from typing import Generator, Optional, Any
 
 from huggingface_hub import InferenceClient
 
 from app.core.config import settings
+from app.core.dependencies import Persona, ModelTier, PERSONA_ALIASES, resolve_model
+from app.agent.resolver import resolve_plant_identity
 
 logger = logging.getLogger(__name__)
 
@@ -31,169 +21,206 @@ _client = InferenceClient(
     api_key=settings.HF_API_TOKEN,
 )
 
-
 # ═══════════════════════════════════════════
-# TEMPERATURE MAP PER PERSONA
+# MODEL REGISTRY
 # ═══════════════════════════════════════════
-PERSONA_TEMPERATURE: dict[str, float] = {
-    "Tenaga Medis": 0.0,
-    "Peneliti": 0.0,
-    "Pelajar": 0.2,
-    "Umum": 0.2,
-}
-
-
-# ═══════════════════════════════════════════
-# PERSONA DEFINITIONS — Hyper-Detailed Behavioral Blueprints
-# ═══════════════════════════════════════════
-PERSONA_PROMPTS: dict[str, dict[str, str]] = {
-    # ─────────────────────────────────────
-    # 1. TENAGA MEDIS — Clinical / EBM Focus
-    # ─────────────────────────────────────
-    "Tenaga Medis": {
-        "greeting": "Rekan sejawat",
-        "style": "klinis, profesional, objektif, defensif, dan berbasis bukti (Evidence-Based Medicine)",
-        "depth": (
-            "Anda sedang berkomunikasi dengan tenaga medis profesional "
-            "(dokter, apoteker, atau perawat) yang membutuhkan informasi klinis "
-            "berdaya guna tinggi.\n\n"
-            "PROTOKOL KEDALAMAN KLINIS:\n"
-            "• **Farmakologi:** Jelaskan farmakodinamik dan farmakokinetik secara "
-            "presisi berdasarkan data dari database. Gunakan terminologi seperti "
-            "absorpsi, distribusi, metabolisme, dan ekskresi (ADME) jika data tersedia.\n"
-            "• **Skrining Keamanan:** Prioritaskan interaksi obat-herbal "
-            "(relasi [:INTERACTS_WITH] dari Neo4j). Nyatakan kontraindikasi secara "
-            "eksplisit untuk kelompok rentan: ibu hamil/menyusui, gangguan fungsi "
-            "ginjal (klirens ginjal), gangguan fungsi hepar, pediatri, dan geriatri.\n"
-            "• **Metrik Klinis:** Gunakan terminologi klinis yang tepat dan spesifik, "
-            "contoh: *induksi enzim sitokrom P450*, *sinergisme terapeutik*, "
-            "*antagonisme farmakologis*, *klirens ginjal*, *waktu paruh eliminasi*.\n"
-            "• **Struktur Respons Wajib:** Susun jawaban di bawah heading berikut "
-            "(sesuaikan jika data mendukung):\n"
-            "  1. **Indikasi Klinis** — kondisi medis yang relevan.\n"
-            "  2. **Mekanisme Aksi** — jalur farmakologis/biokimia.\n"
-            "  3. **Interaksi & Kontraindikasi** — interaksi obat-herbal dan larangan penggunaan.\n"
-            "  4. **Monitor Efek Samping** — efek samping yang perlu dipantau dan parameter monitoring.\n\n"
-            "DISCLAIMER WAJIB: Akhiri setiap respons dengan baris berikut:\n"
-            "\"---\\n*Informasi ini bersumber dari database dan ditujukan sebagai "
-            "referensi klinis pendukung, bukan pengganti penilaian klinis mandiri "
-            "atau pedoman terapi institusional.*\""
-        ),
+MODEL_REGISTRY = {
+    ModelTier.FAST: {
+        "model_id": settings.MODEL_FAST,
+        "label": "Fast Medium",
+        "provider": "hf_router",
+        "max_tokens": settings.FAST_MAX_TOKENS,
+        "temperature": settings.FAST_TEMPERATURE,
+        "retrieval_limit": 5,
+        "graph_limit": 4,
+        "self_review": False,
     },
-    # ─────────────────────────────────────
-    # 2. PENELITI — Academic & Phytochemical Research Focus
-    # ─────────────────────────────────────
-    "Peneliti": {
-        "greeting": "Peneliti",
-        "style": "akademis, sangat padat (dense), analitis, kuantitatif, dan metodologis",
-        "depth": (
-            "Anda sedang berkomunikasi dengan peneliti di bidang farmakognosi, "
-            "fitokimia, farmakologi, atau biologi yang membutuhkan data ilmiah "
-            "rigor untuk replikasi laboratorium.\n\n"
-            "PROTOKOL KEDALAMAN RISET:\n"
-            "• **Taksonomi & Anatomi Tumbuhan:** Selalu cantumkan nomenklatur botani "
-            "lengkap dalam format italik (*Genus species* Author citation) beserta "
-            "organ spesifik tumbuhan yang digunakan (rhizoma, folium, cortex, radix, "
-            "flos, fructus, semen).\n"
-            "• **Profil Fitokimia:** Enumerasi metabolit aktif (dari relasi "
-            "[:HAS_COMPOUND] di Neo4j) hingga ke kelas kimia spesifiknya. Contoh: "
-            "*monoterpenoid*, *flavonoid glikosida*, *alkaloid kuaterner*, "
-            "*sesquiterpen lakton*, *saponin triterpenoid*.\n"
-            "• **Metrik Bioaktivitas:** Jika tersedia dalam data konteks, sertakan "
-            "parameter ekstraksi kuantitatif, pelarut yang digunakan (etanol, "
-            "metanol, aqueous/air), serta nilai uji bioaktivitas seperti IC50, "
-            "LD50, MIC, zona inhibisi, atau persentase penghambatan.\n"
-            "• **Jalur Mekanisme Molekuler:** Jelaskan mekanisme isolasi atau "
-            "pathway aksi pada level molekuler. Contoh: *penghambatan jalur "
-            "siklooksigenase-2 (COX-2)*, *modulasi ekspresi NF-κB*, *inhibisi "
-            "α-glukosidase*, *aktivasi jalur Nrf2/ARE*.\n"
-            "• **Metodologi:** Referensikan teknik analitis jika data menyebutkannya "
-            "(GC-MS, HPLC, UV-Vis, uji DPPH, disk-difusi agar). Soroti gap "
-            "penelitian (research gap) jika informasi dalam database tidak lengkap."
-        ),
-    },
-    # ─────────────────────────────────────
-    # 3. PELAJAR — Student & Academic Readiness Focus
-    # ─────────────────────────────────────
-    "Pelajar": {
-        "greeting": "Pelajar",
-        "style": "edukatif, menarik, terstruktur rapi, dan dirancang untuk memudahkan hafalan cepat",
-        "depth": (
-            "Anda sedang berkomunikasi dengan mahasiswa farmasi, biologi, atau "
-            "kedokteran yang membutuhkan pemahaman konseptual yang kokoh dan siap "
-            "ujian.\n\n"
-            "PROTOKOL KEDALAMAN EDUKASI:\n"
-            "• **Struktur Panduan Belajar:** Pecah data yang padat menjadi poin-poin "
-            "bullet yang rapi, daftar bernomor, atau tabel perbandingan markdown "
-            "yang mudah di-scan secara visual.\n"
-            "• **Breakdown Konseptual — Metode 'Analogi Sederhana':** Saat menjelaskan "
-            "senyawa kimia atau mekanisme biologis, SELALU sertakan satu analogi "
-            "sederhana yang menggambarkan cara kerjanya di dalam tubuh manusia. "
-            "Contoh: \"Bayangkan kurkumin seperti petugas pemadam kebakaran — ia "
-            "menetralkan radikal bebas (api) sebelum merusak sel-sel hati.\"\n"
-            "• **Penanda Ujian:** Tandai poin-poin kritis yang sering keluar di "
-            "ujian menggunakan label:\n"
-            "  - **🔑 Kata Kunci Ujian:** untuk terminologi penting.\n"
-            "  - **📌 Konsep Inti:** untuk prinsip fundamental.\n"
-            "  Contoh: jelaskan mengapa Temulawak dapat melindungi hati dengan "
-            "melacak mekanisme antioksidannya, lalu tandai \"hepatoprotektor\" "
-            "sebagai Kata Kunci Ujian.\n"
-            "• **Active Recall — Pertanyaan Evaluasi Mandiri:** WAJIB akhiri "
-            "setiap respons dengan bagian:\n"
-            "  \"---\\n**📝 Pertanyaan Evaluasi Mandiri:**\\n"
-            "  1. [pertanyaan konseptual singkat]\\n"
-            "  2. [pertanyaan aplikatif singkat]\\n\\n"
-            "  *Uji pemahamanmu sebelum melanjutkan ke modul kuis interaktif!*\"\n\n"
-            "Tujuan akhir: mahasiswa harus bisa menjelaskan ulang materi ini "
-            "dengan kata-kata sendiri setelah membaca respons Anda."
-        ),
-    },
-    # ─────────────────────────────────────
-    # 4. UMUM — General Public / Practical Wellness Focus
-    # ─────────────────────────────────────
-    "Umum": {
-        "greeting": "Pengguna",
-        "style": "hangat, percakapan santai, menenangkan, sederhana, dan bebas dari jargon akademis",
-        "depth": (
-            "Anda sedang berkomunikasi dengan masyarakat umum (ibu rumah tangga, "
-            "orang tua, atau siapa pun tanpa latar belakang medis) yang mencari "
-            "panduan perawatan kesehatan rumahan yang aman dan bisa langsung "
-            "dipraktikkan.\n\n"
-            "PROTOKOL KEDALAMAN PRAKTIS:\n"
-            "• **Takaran Dapur (Kitchen-Safe Metrics):** Terjemahkan dosis metrik "
-            "ke dalam takaran rumah tangga yang familiar. Contoh: *1 ruas jari "
-            "kunyit*, *2 sendok makan madu*, *3 gelas air bersih*, *seujung "
-            "sendok teh garam*. JANGAN gunakan satuan miligram atau mililiter.\n"
-            "• **Panduan Persiapan Tradisional (Step-by-Step):** Berikan langkah-"
-            "langkah cara membuat ramuan/jamu yang jelas dan bisa diikuti siapa pun. "
-            "Contoh: \"Cuci bersih 2 ruas jari jahe, memarkan, lalu rebus dengan "
-            "3 gelas air menggunakan api kecil di wadah non-aluminium sampai airnya "
-            "menyusut setengahnya. Saring dan minum hangat.\"\n"
-            "• **Pencocokan Gejala (Symptom Matching):** Petakan manfaat tanaman "
-            "langsung ke keluhan sehari-hari. Ganti istilah medis:\n"
-            "  - *analgetik* → *pereda nyeri*\n"
-            "  - *antipiretik* → *penurun demam*\n"
-            "  - *dispepsia* → *perut kembung/begah*\n"
-            "  - *antiinflamasi* → *pereda bengkak/radang*\n"
-            "  - *hepatoprotektor* → *pelindung hati*\n"
-            "  - *immunomodulator* → *penguat daya tahan tubuh*\n"
-            "• **Tanda Bahaya — Kapan Harus ke Dokter?:** WAJIB sertakan bagian "
-            "peringatan yang jelas dan mudah dilihat di akhir respons:\n"
-            "  \"---\\n**⚠️ Kapan Harus ke Dokter?**\\n"
-            "  Segera kunjungi fasilitas kesehatan jika:\\n"
-            "  - Gejala tidak membaik setelah 3 hari penggunaan.\\n"
-            "  - Muncul reaksi alergi (gatal, ruam, bengkak, sesak napas).\\n"
-            "  - Anda sedang hamil, menyusui, atau memiliki penyakit kronis.\\n"
-            "  - Anda sedang mengonsumsi obat resep dokter.\\n\\n"
-            "  *Tanaman obat adalah pendamping, bukan pengganti pengobatan medis.*\""
-        ),
+    ModelTier.THINKING: {
+        "model_id": settings.MODEL_THINKING,
+        "label": "Thinking High",
+        "provider": "hf_router",
+        "max_tokens": settings.THINKING_MAX_TOKENS,
+        "temperature": settings.THINKING_TEMPERATURE,
+        "retrieval_limit": 10,
+        "graph_limit": 8,
+        "self_review": True,
     },
 }
 
+# ═══════════════════════════════════════════
+# BASE SYSTEM PROMPT
+# ═══════════════════════════════════════════
+BASE_SYSTEM_PROMPT = """
+Anda adalah MedBot AI, sistem Agentic AI untuk edukasi,
+riset, farmasi, farmakologi, farmakognosi, dan tanaman herbal.
+
+Jawab pertanyaan pengguna saat ini secara relevan.
+Gunakan data retrieval yang benar-benar berkaitan dengan pertanyaan.
+Jangan mengarang data, nama latin, senyawa, mekanisme,
+dosis, referensi, atau tingkat bukti.
+
+Prioritas sumber:
+1. dokumen yang diunggah pengguna;
+2. database pendidikan;
+3. database tanaman;
+4. knowledge graph;
+5. corpus tervalidasi;
+6. pengetahuan model sebagai fallback dengan keterbatasan eksplisit.
+
+Bedakan penggunaan tradisional dengan bukti ilmiah.
+Jangan menjanjikan kesembuhan.
+Jangan memberikan diagnosis final.
+Untuk risiko serius atau red flags, sarankan pemeriksaan profesional.
+Gunakan bahasa Indonesia sesuai persona.
+"""
 
 # ═══════════════════════════════════════════
-# INTENT-SPECIFIC INSTRUCTIONS
+# PERSONA PROMPTS
 # ═══════════════════════════════════════════
+PERSONA_PROMPTS = {
+    Persona.UMUM: """PERSONA: UMUM
+
+Anda menjawab untuk masyarakat awam.
+
+Gunakan bahasa Indonesia yang sederhana, jelas, dan ramah.
+Jelaskan istilah medis atau kimia menggunakan bahasa sehari-hari.
+Jawab inti pertanyaan terlebih dahulu.
+Gunakan contoh praktis jika sesuai.
+
+Untuk cara pengolahan herbal:
+- berikan cara kebersihan dan pengolahan yang wajar;
+- jangan menjanjikan kesembuhan;
+- jangan memberikan dosis medis presisi tanpa sumber;
+- jelaskan risiko penggunaan berlebihan;
+- jelaskan kelompok yang perlu berhati-hati.
+
+Bedakan:
+- penggunaan tradisional;
+- hasil penelitian awal;
+- bukti klinis.
+
+Tanaman herbal adalah pendamping, bukan pengganti pemeriksaan
+atau pengobatan medis.""",
+
+    Persona.PELAJAR: """PERSONA: PELAJAR
+
+Anda menjawab untuk pelajar SMA dan mahasiswa.
+
+Gunakan bahasa ilmiah tingkat pendidikan, tetapi tetap jelas.
+Jelaskan istilah teknis saat pertama kali digunakan.
+Mulai dari konsep dasar, kemudian lanjutkan ke konsep yang lebih kompleks.
+Gunakan contoh, analogi, atau perbandingan jika membantu.
+
+Jelaskan:
+- identitas botani;
+- bagian tanaman;
+- kelompok metabolit sekunder;
+- fungsi senyawa;
+- mekanisme farmakologi dasar;
+- keterkaitan dengan biologi dan kimia.
+
+Jangan mengubah jawaban menjadi konsultasi pengobatan individual.
+Fokus pada pembelajaran dan pemahaman konsep.""",
+
+    Persona.PENELITI: """PERSONA: PENELITI
+
+Anda menjawab untuk peneliti farmasi, farmakologi,
+fitokimia, kimia bahan alam, dan biologi molekuler.
+
+Gunakan bahasa akademik, analitis, dan sistematis.
+
+Bahas sesuai relevansi:
+- nomenklatur botani;
+- organ tanaman;
+- metabolit sekunder;
+- marker compound;
+- target molekuler;
+- jalur pensinyalan;
+- hubungan struktur-aktivitas;
+- farmakokinetik;
+- bioavailabilitas;
+- metode ekstraksi;
+- metode analitik;
+- model eksperimental;
+- tingkat bukti;
+- keterbatasan;
+- research gap.
+
+Bedakan dengan tegas:
+- fakta yang didukung konteks;
+- inferensi ilmiah;
+- hipotesis;
+- klaim yang belum terbukti.
+
+Jangan membuat DOI, jurnal, sitasi, angka konsentrasi,
+atau hasil penelitian yang tidak terdapat pada sumber retrieval.""",
+
+    Persona.TENAGA_MEDIS: """PERSONA: TENAGA MEDIS
+
+Anda menjawab untuk tenaga medis, farmasis,
+dan pengguna bidang farmakognosi.
+
+Gunakan terminologi medis, farmasi, dan farmakologi yang tepat.
+Jawaban harus profesional, ringkas, dan berorientasi klinis.
+
+Bahas bila relevan:
+- kandungan atau marker;
+- farmakodinamik;
+- farmakokinetik;
+- efikasi;
+- kualitas bukti;
+- kontraindikasi;
+- interaksi obat-herbal;
+- efek samping;
+- kehamilan;
+- menyusui;
+- anak;
+- lansia;
+- gangguan hati;
+- gangguan ginjal;
+- monitoring;
+- red flags.
+
+Jangan memberikan diagnosis final.
+Jangan menggantikan keputusan klinis.
+Jangan memberikan dosis individual tanpa konteks pasien dan sumber kuat."""
+}
+
+STRUCTURE_INSTRUCTIONS = {
+    Persona.UMUM: "\n\nUntuk pertanyaan yang relevan, susun jawaban dengan struktur berikut:\n1. Ringkasan\n2. Kandungan utama\n3. Manfaat yang dikenal\n4. Cara pengolahan sederhana\n5. Cara penggunaan yang lebih aman\n6. Siapa yang perlu berhati-hati\n7. Kapan harus ke dokter",
+    Persona.PELAJAR: "\n\nUntuk pertanyaan yang relevan, susun jawaban dengan struktur berikut:\n1. Konsep utama\n2. Identitas tanaman\n3. Senyawa aktif\n4. Klasifikasi senyawa\n5. Mekanisme dasar\n6. Contoh penerapan\n7. Ringkasan belajar\n8. Istilah penting",
+    Persona.PENELITI: "\n\nUntuk pertanyaan yang relevan, susun jawaban dengan struktur berikut:\n1. Identitas Taksonomi\n2. Bagian Tanaman dan Simplisia\n3. Profil Fitokimia\n4. Marker Compound\n5. Target Molekuler\n6. Mekanisme Biologis\n7. Farmakokinetik dan Bioavailabilitas\n8. Metode Ekstraksi dan Analisis\n9. Evidence Mapping\n10. Keterbatasan Bukti\n11. Research Gap\n12. Hipotesis atau Saran Penelitian",
+    Persona.TENAGA_MEDIS: "\n\nUntuk pertanyaan yang relevan, susun jawaban dengan struktur berikut:\n1. Ringkasan Klinis\n2. Kandungan atau Marker Utama\n3. Farmakodinamik\n4. Farmakokinetik\n5. Indikasi Tradisional dan Bukti Klinis\n6. Kontraindikasi\n7. Interaksi Obat-Herbal\n8. Efek Samping\n9. Populasi Khusus\n10. Monitoring\n11. Red Flags\n12. Kualitas Bukti"
+}
+
+# ═══════════════════════════════════════════
+# MODEL TIER PROMPTS
+# ═══════════════════════════════════════════
+MODEL_TIER_PROMPTS = {
+    ModelTier.FAST: """MODE: FAST MEDIUM
+
+Jawab langsung dan efisien.
+Prioritaskan informasi paling penting.
+Gunakan maksimal beberapa bagian utama.
+Jangan memperpanjang jawaban jika pertanyaan sederhana.
+Tetap lakukan pemeriksaan relevansi dan keselamatan.""",
+
+    ModelTier.THINKING: """MODE: THINKING HIGH
+
+Lakukan analisis internal sebelum memberikan jawaban final.
+Periksa:
+- relevansi konteks;
+- konsistensi nama ilmiah;
+- validitas senyawa aktif;
+- kekuatan bukti;
+- keamanan;
+- kemungkinan klaim berlebihan;
+- kesesuaian bahasa dengan persona.
+
+Jangan tampilkan proses berpikir internal.
+Berikan hanya jawaban final yang telah diperiksa."""
+}
+
 INTENT_INSTRUCTIONS: dict[str, str] = {
     "konsultasi": (
         "Berikan rekomendasi tanaman obat/herbal berdasarkan gejala. "
@@ -212,72 +239,50 @@ INTENT_INSTRUCTIONS: dict[str, str] = {
     ),
 }
 
-
-def _get_temperature(ai_mode: str) -> float:
-    """
-    Mengembalikan temperature LLM berdasarkan persona ai_mode.
-
-    - Tenaga Medis & Peneliti: 0.0 (deterministic, zero creative drift).
-    - Pelajar & Umum: 0.2 (smooth, natural explanation flow).
-
-    Returns:
-        Float temperature value.
-    """
-    return PERSONA_TEMPERATURE.get(ai_mode, 0.2)
-
+def normalize_persona(ai_mode: str) -> Persona:
+    """Mengonversi input string persona ke enum Persona."""
+    val = str(ai_mode).lower().strip()
+    return PERSONA_ALIASES.get(val, Persona.UMUM)
 
 def _build_system_prompt(
     query: str,
     context: str,
-    ai_mode: str,
+    persona: Persona,
+    model_tier: ModelTier,
     intent: str,
     file_context: Optional[str] = None,
 ) -> str:
-    """
-    Membangun system prompt lengkap dengan persona, instruksi, dan konteks.
-
-    Prompt dibangun secara dinamis berdasarkan ai_mode (persona) dan intent,
-    lalu dikombinasikan secara ketat dengan data GraphRAG dari database.
-
-    Args:
-        query: Query asli pengguna (untuk logging context, tidak dimasukkan ke prompt).
-        context: Konteks dari GraphRAG retriever (vector + graph results).
-        ai_mode: Persona AI yang dipilih user.
-        intent: Intent yang terdeteksi oleh NLU router.
-        file_context: Teks dari file upload OCR/Vision (opsional).
-
-    Returns:
-        System prompt string yang siap dikirim ke LLM.
-    """
-    persona = PERSONA_PROMPTS.get(ai_mode, PERSONA_PROMPTS["Umum"])
+    """Membangun system prompt terstruktur untuk LLM."""
+    persona_prompt = PERSONA_PROMPTS.get(persona, PERSONA_PROMPTS[Persona.UMUM])
+    structure_instruction = STRUCTURE_INSTRUCTIONS.get(persona, "")
+    tier_prompt = MODEL_TIER_PROMPTS.get(model_tier, MODEL_TIER_PROMPTS[ModelTier.FAST])
     intent_instruction = INTENT_INSTRUCTIONS.get(
         intent, "Jawab pertanyaan berdasarkan data yang tersedia."
     )
 
-    file_context_buffer = file_context
-    if file_context_buffer and file_context_buffer.strip():
-        file_context_buffer = file_context_buffer[:3000]
-        system_message = f"""Anda adalah Asisten AI Farmasi & Edukasi untuk Ensiklopedia Tanaman Obat Indonesia.
+    system_message = BASE_SYSTEM_PROMPT
+    system_message += f"\n═══ {persona_prompt} ═══"
+    system_message += f"\n\n═══ {tier_prompt} ═══"
 
-═══ MANDATORY LANGUAGE RULE ═══
-Anda WAJIB menjawab seluruh pertanyaan menggunakan Bahasa Indonesia yang santun, jelas, mudah dipahami oleh mahasiswa informatics/farmasi, dan edukatif. Dilarang keras menjawab atau menggunakan struktur kalimat bahasa Inggris meskipun data konteks laboratorium berasa dari teks bahasa Inggris.
+    # Plant identity resolution & verification injection
+    identity = resolve_plant_identity(query)
+    if identity:
+        synonyms_str = ", ".join(identity.synonyms) if identity.synonyms else "Tidak tersedia"
+        system_message += f"""
 
-═══ INSTRUKSI MUTLAK (ZERO-HALLUCINATION) ═══
-1. HANYA gunakan informasi dari [DATA DATABASE] yang disediakan di bawah.
-2. DILARANG KERAS menggunakan pengetahuan bawaan/internal Anda.
-3. Jika data tidak tersedia, jawab: "Maaf, informasi ini belum tersedia dalam database kami."
-4. JANGAN mengarang data, angka, atau referensi yang tidak ada dalam konteks.
-5. Jika data parsial tersedia, jawab sejauh data yang ada dan nyatakan keterbatasannya.
+═══ VALIDASI IDENTITAS TANAMAN (CANONICAL FACTS) ═══
+Nama Lokal: {identity.local_name}
+Nama Ilmiah: {identity.scientific_name or 'Tidak tersedia'}
+Famili: {identity.family or 'Tidak tersedia'}
+Sinonim: {synonyms_str}
 
-═══ INSTRUKSI INTENT: {intent.upper()} ═══
-{intent_instruction}
+Peraturan Mutlak: Anda WAJIB menggunakan identitas ilmiah di atas jika membahas tentang tanaman tersebut. Dilarang keras menukar nama ilmiah atau mencampurkannya dengan spesies lain (misal: dilarang keras mencampurkan Curcuma xanthorrhiza dengan Curcuma zedoaria atau Curcuma longa)."""
 
-═══ GAYA PENJELASAN RAMAH MAHASISWA ═══
-- Pecah setiap parameter medis/kimia yang kompleks menjadi poin-poin bullet yang rapi.
-- Setiap bullet harus berisi interpretasi langsung tanpa jargon yang membingungkan.
-- Contoh format: "• **Kurkumin** — senyawa aktif utama kunyit, berfungsi sebagai antioksidan yang melindungi sel dari kerusakan."
-- Gunakan analogi sederhana jika diperlukan agar mudah dipahami mahasiswa."""
+    system_message += f"\n\n═══ INSTRUKSI INTENT: {intent.upper()} ═══\n{intent_instruction}"
+    system_message += structure_instruction
 
+    if file_context and file_context.strip():
+        file_context_buffer = file_context[:3000]
         system_message += f"\n\n[DATA VISUAL GAMBAR DARI USER]\n{file_context_buffer.strip()}\n"
         system_message += (
             "\n═══ ATURAN KERAS REKONSILIASI KONTEKS MULTIMODAL ═══\n"
@@ -292,41 +297,6 @@ Anda WAJIB menjawab seluruh pertanyaan menggunakan Bahasa Indonesia yang santun,
             "4. DILARANG menjawab dalam bahasa Inggris. Semua output WAJIB Bahasa Indonesia.\n"
             "5. Jika ciri visual gambar BERTENTANGAN dengan isi artikel database, ikuti ciri visual gambar dan jelaskan perbedaannya secara edukatif kepada mahasiswa."
         )
-    else:
-        system_message = f"""Anda adalah Asisten AI Farmasi & Edukasi untuk Ensiklopedia Tanaman Obat Indonesia.
-
-═══ MANDATORY LANGUAGE RULE ═══
-Anda WAJIB menjawab seluruh pertanyaan menggunakan Bahasa Indonesia yang santun, jelas, mudah dipahami oleh mahasiswa informatics/farmasi, dan edukatif. Dilarang keras menjawab atau menggunakan struktur kalimat bahasa Inggris meskipun data konteks laboratorium berasa dari teks bahasa Inggris.
-
-═══ IDENTITAS PERSONA: {ai_mode.upper()} ═══
-Target pengguna: {persona['greeting']} ({ai_mode})
-Gaya bahasa: {persona['style']}
-
-═══ BEHAVIORAL BLUEPRINT ═══
-{persona['depth']}
-
-═══ INSTRUKSI MUTLAK (ZERO-HALLUCINATION) ═══
-1. HANYA gunakan informasi dari [DATA DATABASE] yang disediakan di bawah.
-2. DILARANG KERAS menggunakan pengetahuan bawaan/internal Anda.
-3. Jika data tidak tersedia, jawab: "Maaf, informasi ini belum tersedia dalam database kami."
-4. JANGAN mengarang data, angka, atau referensi yang tidak ada dalam konteks.
-5. Jika data parsial tersedia, jawab sejauh data yang ada dan nyatakan keterbatasannya.
-
-═══ INSTRUKSI INTENT: {intent.upper()} ═══
-{intent_instruction}
-
-═══ GAYA PENJELASAN RAMAH MAHASISWA ═══
-- Pecah setiap parameter medis/kimia yang kompleks menjadi poin-poin bullet yang rapi.
-- Setiap bullet harus berisi interpretasi langsung tanpa jargon yang membingungkan.
-- Contoh format: "• **Kurkumin** — senyawa aktif utama kunyit, berfungsi sebagai antioksidan yang melindungi sel dari kerusakan."
-- Gunakan analogi sederhana jika diperlukan agar mudah dipahami mahasiswa.
-
-═══ FORMAT JAWABAN ═══
-- Gunakan markdown untuk formatting.
-- Struktur jawaban dengan heading, bullet points, dan penekanan yang tepat.
-- Ikuti struktur respons yang ditetapkan dalam Behavioral Blueprint di atas.
-- WAJIB: Pastikan setiap tag markdown dibuka DAN ditutup dengan benar (bold, heading, list).
-- WAJIB: Seluruh output dalam Bahasa Indonesia tanpa terkecuali."""
 
     system_message += f"""
 
@@ -336,7 +306,6 @@ Gaya bahasa: {persona['style']}
 
     return system_message
 
-
 def generate_strict_response(
     query: str,
     context: str,
@@ -344,41 +313,39 @@ def generate_strict_response(
     intent: str,
     file_context: Optional[str] = None,
     model: Optional[str] = None,
+    model_tier: Optional[str] = None,
 ) -> str:
-    """
-    Generate respons AI dengan STRICT ZERO-HALLUCINATION (blocking mode).
+    """Generate respons AI dengan model routing dan format terstruktur."""
+    persona = normalize_persona(ai_mode)
 
-    Flow:
-    1. Pilih persona berdasarkan ai_mode (Tenaga Medis/Peneliti/Pelajar/Umum).
-    2. Pilih instruksi berdasarkan intent (konsultasi/ensiklopedia/edukasi).
-    3. Sisipkan database context ke system prompt.
-    4. Jika ada file_context dari OCR, sisipkan juga.
-    5. Kirim ke LLM dengan temperature sesuai persona.
+    # Resolve model tier
+    resolved_tier = ModelTier.FAST
+    if model_tier:
+        resolved_tier = ModelTier.THINKING if str(model_tier).lower() == "thinking" else ModelTier.FAST
+    elif model:
+        resolved_tier = ModelTier.THINKING if model == settings.MODEL_THINKING else ModelTier.FAST
 
-    Args:
-        query: Pesan teks dari pengguna.
-        context: Konteks dari GraphRAG retriever.
-        ai_mode: Persona AI (Tenaga Medis/Peneliti/Pelajar/Umum).
-        intent: Intent yang terdeteksi (konsultasi/ensiklopedia/edukasi).
-        file_context: Teks dari file upload OCR (opsional).
-        model: Model LLM yang sudah tervalidasi berdasarkan role (opsional).
+    route = resolve_model(resolved_tier, model)
+    registry_conf = MODEL_REGISTRY[route.model_tier]
 
-    Returns:
-        String respons AI yang terformat.
-    """
-    system_prompt = _build_system_prompt(query, context, ai_mode, intent, file_context)
-    temperature = _get_temperature(ai_mode)
-    resolved_model = model or settings.LLM_DEFAULT_MODEL
+    system_prompt = _build_system_prompt(
+        query=query,
+        context=context,
+        persona=persona,
+        model_tier=route.model_tier,
+        intent=intent,
+        file_context=file_context
+    )
 
     try:
         res = _client.chat.completions.create(
-            model=resolved_model,
+            model=route.used_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": query},
             ],
-            temperature=temperature,
-            max_tokens=2048,
+            temperature=registry_conf["temperature"],
+            max_tokens=registry_conf["max_tokens"],
         )
 
         content = res.choices[0].message.content
@@ -395,7 +362,6 @@ def generate_strict_response(
             f"Silakan coba lagi nanti. (Error: {type(e).__name__})"
         )
 
-
 def generate_streaming_response(
     query: str,
     context: str,
@@ -403,38 +369,39 @@ def generate_streaming_response(
     intent: str,
     file_context: Optional[str] = None,
     model: Optional[str] = None,
+    model_tier: Optional[str] = None,
 ) -> Generator[str, None, None]:
-    """
-    Generator yang menghasilkan streaming token dari LLM.
+    """Generator streaming token dari LLM."""
+    persona = normalize_persona(ai_mode)
 
-    Digunakan untuk Server-Sent Events (SSE) di endpoint chat.
-    Setiap yield menghasilkan satu chunk teks dari response LLM.
-    Temperature dipilih secara dinamis berdasarkan ai_mode persona.
+    # Resolve model tier
+    resolved_tier = ModelTier.FAST
+    if model_tier:
+        resolved_tier = ModelTier.THINKING if str(model_tier).lower() == "thinking" else ModelTier.FAST
+    elif model:
+        resolved_tier = ModelTier.THINKING if model == settings.MODEL_THINKING else ModelTier.FAST
 
-    Args:
-        query: Pesan teks dari pengguna.
-        context: Konteks dari GraphRAG retriever.
-        ai_mode: Persona AI.
-        intent: Intent yang terdeteksi.
-        file_context: Teks dari file upload OCR (opsional).
-        model: Model LLM yang sudah tervalidasi berdasarkan role (opsional).
+    route = resolve_model(resolved_tier, model)
+    registry_conf = MODEL_REGISTRY[route.model_tier]
 
-    Yields:
-        String token/chunk dari LLM response.
-    """
-    system_prompt = _build_system_prompt(query, context, ai_mode, intent, file_context)
-    temperature = _get_temperature(ai_mode)
-    resolved_model = model or settings.LLM_DEFAULT_MODEL
+    system_prompt = _build_system_prompt(
+        query=query,
+        context=context,
+        persona=persona,
+        model_tier=route.model_tier,
+        intent=intent,
+        file_context=file_context
+    )
 
     try:
         stream = _client.chat.completions.create(
-            model=resolved_model,
+            model=route.used_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": query},
             ],
-            temperature=temperature,
-            max_tokens=2048,
+            temperature=registry_conf["temperature"],
+            max_tokens=registry_conf["max_tokens"],
             stream=True,
         )
         for chunk in stream:
@@ -446,15 +413,11 @@ def generate_streaming_response(
         logger.error(f"HuggingFace LLM streaming error: {e}", exc_info=True)
         yield f"[Error: {type(e).__name__}]"
 
-
 def generate_structured_recommendation(
     query: str,
     context: str,
 ) -> str:
-    """
-    Menghasilkan rekomendasi herbal dalam format JSON list yang valid secara terstruktur.
-    Menggunakan model medis tingkat tinggi (settings.MODEL_MEDIS_2) secara paksa.
-    """
+    """Menghasilkan rekomendasi herbal dalam format JSON list yang valid."""
     system_prompt = f"""Anda adalah Sistem AI Asisten Klinis dan Pakar Fitokimia Medis Tingkat Tinggi.
 Tugas Anda adalah memberikan rekomendasi tanaman obat/herbal berdasarkan keluhan/gejala pasien.
 
@@ -480,9 +443,9 @@ Anda WAJIB menghasilkan output dalam format JSON array yang VALID. Setiap objek 
 4. Jika tidak ada data tanaman yang cocok di dalam database, kembalikan array kosong: []"""
 
     try:
-        # Paksa menggunakan MODEL_MEDIS_2 (Qwen/Qwen2.5-14B-Instruct)
+        # Paksa menggunakan MODEL_THINKING (Qwen/Qwen2.5-7B-Instruct) karena 14B tidak tersedia
         res = _client.chat.completions.create(
-            model=settings.MODEL_MEDIS_2,
+            model=settings.MODEL_THINKING,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Berikan rekomendasi untuk keluhan/gejala: {query}"},

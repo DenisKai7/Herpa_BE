@@ -1,16 +1,5 @@
 """
 GraphRAG Retriever - Hybrid search menggunakan Supabase pgvector + Neo4j Cypher.
-
-Menggabungkan dua paradigma pencarian:
-1. Cosine Similarity (Semantic Search): Menggunakan pgvector di Supabase
-   untuk menemukan dokumen yang secara semantik mirip dengan query.
-2. Graph Traversal (Relational Search): Menggunakan Cypher di Neo4j
-   untuk menemukan relasi antar entitas (herbs, compounds).
-
-Setiap intent memiliki retriever khusus:
-- konsultasi: tanaman obat berdasarkan gejala + relasi compound/drug.
-- ensiklopedia: informasi detail tanaman + taksonomi/botani.
-- edukasi: materi edukasi + relasi antar konsep dengan proteksi multi-label.
 """
 
 import logging
@@ -19,28 +8,27 @@ from typing import Any, Optional
 
 from app.core.database import neo4j_driver, supabase
 from app.core.embedding import embed_text
+from app.core.dependencies import Persona, PERSONA_ALIASES
 
 logger = logging.getLogger(__name__)
 
+# ═══════════════════════════════════════════
+# HELPER: NORMALIZE PERSONA
+# ═══════════════════════════════════════════
+def _normalize_persona(ai_mode: str) -> Persona:
+    val = str(ai_mode).lower().strip()
+    return PERSONA_ALIASES.get(val, Persona.UMUM)
 
 # ═══════════════════════════════════════════
 # HELPER: VECTOR SEARCH (Supabase pgvector)
 # ═══════════════════════════════════════════
-
 def _vector_search(
     query: str,
     table: str,
     match_function: str,
     limit: int = 5,
 ) -> list[dict[str, Any]]:
-    """
-    Melakukan pencarian semantik menggunakan Supabase RPC (pgvector cosine similarity).
-
-    Supabase harus memiliki SQL function (match_function) yang menerima:
-    - query_embedding: vector(768)
-    - match_count: int
-    - match_threshold: float
-    """
+    """Melakukan pencarian semantik menggunakan Supabase RPC."""
     try:
         query_embedding = embed_text(query)
 
@@ -65,16 +53,11 @@ def _vector_search(
         )
         return []
 
-
 # ═══════════════════════════════════════════
 # HELPER: GRAPH SEARCH (Neo4j Cypher)
 # ═══════════════════════════════════════════
-
 def _graph_search(query: str, cypher_query: str, **kwargs: Any) -> list[dict[str, Any]]:
-    """
-    Menjalankan Cypher query di Neo4j untuk mendapatkan relasi antar entitas.
-    Menggunakan driver.execute_query() dengan built-in auto-retry untuk koneksi defunct.
-    """
+    """Menjalankan Cypher query di Neo4j."""
     try:
         params = {"query": query}
         params.update(kwargs)
@@ -86,20 +69,17 @@ def _graph_search(query: str, cypher_query: str, **kwargs: Any) -> list[dict[str
         logger.info(f"Graph search: {len(result)} records found.")
         return result
     except Exception as e:
-        logger.error(
-            f"Graph database connectivity lost or query failed: {e}",
-            exc_info=True,
+        logger.exception(
+            "Graph retrieval failed; continuing without graph context: %s",
+            e,
         )
         return []
-
 
 def _format_records_to_text(
     records: list[dict[str, Any]],
     source_label: str = "Database",
 ) -> str:
-    """
-    Mengubah list of dict menjadi teks terstruktur untuk dikirim ke LLM.
-    """
+    """Mengubah list of dict menjadi teks terstruktur untuk dikirim ke LLM."""
     if not records:
         return f"[{source_label}]: Tidak ada data ditemukan."
 
@@ -113,15 +93,11 @@ def _format_records_to_text(
         lines.extend(parts)
     return "\n".join(lines)
 
-
 # ═══════════════════════════════════════════
 # INTENT: KONSULTASI (Content-Based Recommendation)
 # ═══════════════════════════════════════════
-
-def content_based_recommendation(query: str, limit: int = 5) -> str:
-    """
-    Hybrid search untuk intent 'konsultasi' dengan pencarian keyword pada Herb & Compound.
-    """
+def content_based_recommendation(query: str, limit: int = 5, graph_limit: int = 4, persona: str = "umum") -> str:
+    """Hybrid search untuk intent 'konsultasi' dengan profil retrieval per-persona."""
     # ── STEP 1: Vector Search ──
     vector_results = _vector_search(query, "plants", "match_plants", limit)
     vector_text = _format_records_to_text(
@@ -129,47 +105,95 @@ def content_based_recommendation(query: str, limit: int = 5) -> str:
     )
 
     # ── STEP 2: Graph Search ──
-    # Strict Tag Isolation Layer
     tag_match = re.search(r'\[target:\s*([^\]]+)\]', query.lower() if query else "")
     if tag_match:
-        # Clean any potential spaces or underscores
         exact_compound = tag_match.group(1).strip()
         cleaned_words = [exact_compound]
-        logger.info(f"[Retriever Strict Match] Isolated visual target compound: {cleaned_words}")
     else:
-        # Standard text chat fallback tokenization
         cleaned_words = list(set(re.findall(r'\b\w{4,}\b', query.lower() if query else "")))
         if not cleaned_words:
             cleaned_words = [query.lower()] if query else [""]
 
-    cypher = """
-    MATCH (h:Herb)
-    WHERE any(w IN $words WHERE toLower(h.name) CONTAINS w OR toLower(h.description) CONTAINS w)
-       OR toLower(h.name) CONTAINS toLower($query)
-       OR toLower(h.description) CONTAINS toLower($query)
-    OPTIONAL MATCH (h)-[:HAS_COMPOUND]->(c:Compound)
-    RETURN h.name AS tanaman,
-           h.name AS nama_latin,
-           collect(DISTINCT c.name) AS senyawa_aktif,
-           [] AS interaksi_obat
-    LIMIT 5
-    """
-    graph_results = _graph_search(query, cypher, words=cleaned_words)
+    p_enum = _normalize_persona(persona)
+
+    # Persona-specific Neo4j Queries
+    if p_enum == Persona.UMUM:
+        cypher = """
+        MATCH (h:Herb)
+        WHERE any(w IN $words WHERE toLower(h.commonName) CONTAINS w OR toLower(h.macroscopicDesc) CONTAINS w)
+           OR toLower(h.commonName) CONTAINS toLower($query)
+           OR toLower(h.macroscopicDesc) CONTAINS toLower($query)
+        OPTIONAL MATCH (h)-[:USED_FOR]->(t:TherapeuticUse)
+        OPTIONAL MATCH (h)-[:HAS_TOXICITY]->(tox:ToxicityCategory)
+        RETURN h.commonName AS tanaman,
+               h.latinName AS nama_latin,
+               h.macroscopicDesc AS deskripsi_umum,
+               collect(DISTINCT t.name) AS manfaat_tradisional,
+               collect(DISTINCT tox.name) AS tingkat_keamanan
+        LIMIT $limit
+        """
+    elif p_enum == Persona.PELAJAR:
+        cypher = """
+        MATCH (h:Herb)
+        WHERE any(w IN $words WHERE toLower(h.commonName) CONTAINS w OR toLower(h.macroscopicDesc) CONTAINS w)
+           OR toLower(h.commonName) CONTAINS toLower($query)
+           OR toLower(h.macroscopicDesc) CONTAINS toLower($query)
+        OPTIONAL MATCH (h)-[:BELONGS_TO]->(f:Family)
+        OPTIONAL MATCH (h)-[:HAS_COMPOUND]->(c:Compound)
+        RETURN h.commonName AS tanaman,
+               h.latinName AS nama_latin,
+               h.simplisiaName AS nama_simplisia,
+               f.name AS famili,
+               collect(DISTINCT c.name) AS senyawa_aktif
+        LIMIT $limit
+        """
+    elif p_enum == Persona.PENELITI:
+        cypher = """
+        MATCH (h:Herb)
+        WHERE any(w IN $words WHERE toLower(h.commonName) CONTAINS w OR toLower(h.macroscopicDesc) CONTAINS w)
+           OR toLower(h.commonName) CONTAINS toLower($query)
+           OR toLower(h.macroscopicDesc) CONTAINS toLower($query)
+        OPTIONAL MATCH (h)-[:HAS_COMPOUND]->(c:Compound)
+        OPTIONAL MATCH (h)-[:HAS_COMPOUND_CLASS]->(cc:CompoundClass)
+        OPTIONAL MATCH (h)-[:HAS_PROTEIN_TARGET]->(pt:ProteinTarget)
+        RETURN h.commonName AS tanaman,
+               h.latinName AS nama_latin,
+               h.simplisiaName AS simplisia,
+               collect(DISTINCT c.name) AS senyawa_aktif,
+               collect(DISTINCT cc.name) AS kelas_senyawa,
+               collect(DISTINCT pt.name) AS target_protein
+        LIMIT $limit
+        """
+    else: # Tenaga Medis
+        cypher = """
+        MATCH (h:Herb)
+        WHERE any(w IN $words WHERE toLower(h.commonName) CONTAINS w OR toLower(h.macroscopicDesc) CONTAINS w)
+           OR toLower(h.commonName) CONTAINS toLower($query)
+           OR toLower(h.macroscopicDesc) CONTAINS toLower($query)
+        OPTIONAL MATCH (h)-[:HAS_TOXICITY]->(tox:ToxicityCategory)
+        OPTIONAL MATCH (h)-[:USED_FOR]->(t:TherapeuticUse)
+        RETURN h.commonName AS tanaman,
+               h.latinName AS nama_latin,
+               h.simplisiaName AS simplisia,
+               h.macroscopicDesc AS deskripsi_makros,
+               h.microscopicDesc AS deskripsi_mikros,
+               collect(DISTINCT t.name) AS indikasi_klinis,
+               collect(DISTINCT tox.name) AS toksisitas_dan_efek_samping
+        LIMIT $limit
+        """
+
+    graph_results = _graph_search(query, cypher, words=cleaned_words, limit=graph_limit)
     graph_text = _format_records_to_text(
         graph_results, "Relasi Graph Tanaman-Gejala-Senyawa"
     )
 
     return f"{vector_text}\n\n{graph_text}"
 
-
 # ═══════════════════════════════════════════
 # INTENT: ENSIKLOPEDIA (Encyclopedia Search)
 # ═══════════════════════════════════════════
-
-def search_encyclopedia(query: str, limit: int = 5) -> str:
-    """
-    Hybrid search untuk intent 'ensiklopedia' dengan proteksi multi-label.
-    """
+def search_encyclopedia(query: str, limit: int = 5, graph_limit: int = 4, persona: str = "umum") -> str:
+    """Hybrid search untuk intent 'ensiklopedia'."""
     # ── STEP 1: Vector Search ──
     vector_results = _vector_search(
         query, "encyclopedia", "match_encyclopedia", limit
@@ -177,55 +201,92 @@ def search_encyclopedia(query: str, limit: int = 5) -> str:
     vector_text = _format_records_to_text(vector_results, "Pencarian Ensiklopedia")
 
     # ── STEP 2: Graph Search ──
-    # Strict Tag Isolation Layer
     tag_match = re.search(r'\[target:\s*([^\]]+)\]', query.lower() if query else "")
     if tag_match:
-        # Clean any potential spaces or underscores
         exact_compound = tag_match.group(1).strip()
         cleaned_words = [exact_compound]
-        logger.info(f"[Retriever Strict Match] Isolated visual target compound: {cleaned_words}")
     else:
-        # Standard text chat fallback tokenization
         cleaned_words = list(set(re.findall(r'\b\w{4,}\b', query.lower() if query else "")))
         if not cleaned_words:
             cleaned_words = [query.lower()] if query else [""]
 
-    cypher = """
-    MATCH (p)
-    WHERE (p:Plant OR p:Herb)
-      AND (any(w IN $words WHERE toLower(p.name) CONTAINS w OR w CONTAINS toLower(p.name))
-       OR any(w IN $words WHERE toLower(p.nama_latin) CONTAINS w OR w CONTAINS toLower(p.nama_latin))
-       OR toLower(p.name) CONTAINS toLower($query)
-       OR toLower(p.nama_latin) CONTAINS toLower($query))
-    OPTIONAL MATCH (p)-[:BELONGS_TO]->(f:Family)
-    OPTIONAL MATCH (p)-[:HAS_COMPOUND]->(c:Compound)
-    OPTIONAL MATCH (p)-[:FOUND_IN]->(r:Region)
-    RETURN p.name AS nama, p.nama_latin AS nama_latin,
-           p.description AS deskripsi,
-           f.name AS famili,
-           collect(DISTINCT c.name) AS senyawa_aktif,
-           collect(DISTINCT r.name) AS daerah_asal
-    LIMIT 5
-    """
-    graph_results = _graph_search(query, cypher, words=cleaned_words)
+    p_enum = _normalize_persona(persona)
+
+    # Persona-specific Neo4j Queries
+    if p_enum == Persona.UMUM:
+        cypher = """
+        MATCH (p:Herb)
+        WHERE any(w IN $words WHERE toLower(p.commonName) CONTAINS w OR toLower(p.latinName) CONTAINS w)
+           OR toLower(p.commonName) CONTAINS toLower($query)
+           OR toLower(p.latinName) CONTAINS toLower($query)
+        OPTIONAL MATCH (p)-[:USED_FOR]->(t:TherapeuticUse)
+        OPTIONAL MATCH (p)-[:HAS_TOXICITY]->(tox:ToxicityCategory)
+        RETURN p.commonName AS nama, p.latinName AS nama_latin,
+               p.macroscopicDesc AS deskripsi,
+               collect(DISTINCT t.name) AS manfaat_tradisional,
+               collect(DISTINCT tox.name) AS tingkat_keamanan
+        LIMIT $limit
+        """
+    elif p_enum == Persona.PELAJAR:
+        cypher = """
+        MATCH (p:Herb)
+        WHERE any(w IN $words WHERE toLower(p.commonName) CONTAINS w OR toLower(p.latinName) CONTAINS w)
+           OR toLower(p.commonName) CONTAINS toLower($query)
+           OR toLower(p.latinName) CONTAINS toLower($query)
+        OPTIONAL MATCH (p)-[:BELONGS_TO]->(f:Family)
+        OPTIONAL MATCH (p)-[:HAS_COMPOUND]->(c:Compound)
+        RETURN p.commonName AS nama, p.latinName AS nama_latin,
+               p.simplisiaName AS nama_simplisia,
+               f.name AS famili,
+               collect(DISTINCT c.name) AS senyawa_aktif
+        LIMIT $limit
+        """
+    elif p_enum == Persona.PENELITI:
+        cypher = """
+        MATCH (p:Herb)
+        WHERE any(w IN $words WHERE toLower(p.commonName) CONTAINS w OR toLower(p.latinName) CONTAINS w)
+           OR toLower(p.commonName) CONTAINS toLower($query)
+           OR toLower(p.latinName) CONTAINS toLower($query)
+        OPTIONAL MATCH (p)-[:HAS_COMPOUND]->(c:Compound)
+        OPTIONAL MATCH (p)-[:HAS_COMPOUND_CLASS]->(cc:CompoundClass)
+        OPTIONAL MATCH (p)-[:HAS_PROTEIN_TARGET]->(pt:ProteinTarget)
+        RETURN p.commonName AS nama, p.latinName AS nama_latin,
+               p.simplisiaName AS simplisia,
+               collect(DISTINCT c.name) AS senyawa_aktif,
+               collect(DISTINCT cc.name) AS kelas_senyawa,
+               collect(DISTINCT pt.name) AS target_protein
+        LIMIT $limit
+        """
+    else: # Tenaga Medis
+        cypher = """
+        MATCH (p:Herb)
+        WHERE any(w IN $words WHERE toLower(p.commonName) CONTAINS w OR toLower(p.latinName) CONTAINS w)
+           OR toLower(p.commonName) CONTAINS toLower($query)
+           OR toLower(p.latinName) CONTAINS toLower($query)
+        OPTIONAL MATCH (p)-[:HAS_TOXICITY]->(tox:ToxicityCategory)
+        OPTIONAL MATCH (p)-[:USED_FOR]->(t:TherapeuticUse)
+        RETURN p.commonName AS nama, p.latinName AS nama_latin,
+               p.simplisiaName AS simplisia,
+               p.macroscopicDesc AS deskripsi_makros,
+               p.microscopicDesc AS deskripsi_mikros,
+               collect(DISTINCT t.name) AS indikasi_klinis,
+               collect(DISTINCT tox.name) AS toksisitas_dan_efek_samping
+        LIMIT $limit
+        """
+
+    graph_results = _graph_search(query, cypher, words=cleaned_words, limit=graph_limit)
     graph_text = _format_records_to_text(
         graph_results, "Relasi Graph Ensiklopedia"
     )
 
     return f"{vector_text}\n\n{graph_text}"
 
-
 # ═══════════════════════════════════════════
 # INTENT: EDUKASI (Education Corpus Retrieval)
 # ═══════════════════════════════════════════
-
-def retrieve_education_corpus(query: str, limit: int = 5) -> str:
-    """
-    Hybrid search untuk intent 'edukasi'.
-    Mencari secara independen dari sisi Tanaman (Herb) maupun Senyawa (Compound)
-    untuk menghindari bottleneck pencarian multimodal RAG.
-    """
-    # ── STEP 1: Vector Search (Supabase pgvector) ──
+def retrieve_education_corpus(query: str, limit: int = 5, graph_limit: int = 4, persona: str = "umum") -> str:
+    """Hybrid search untuk intent 'edukasi'."""
+    # ── STEP 1: Vector Search ──
     vector_results = _vector_search(
         query, "education_materials", "match_education", limit
     )
@@ -233,58 +294,127 @@ def retrieve_education_corpus(query: str, limit: int = 5) -> str:
         vector_results, "Pencarian Materi Edukasi"
     )
 
-    # ── STEP 2: Graph Search (Neo4j Independent Dual-Path Match) ──
-    # Strict Tag Isolation Layer
+    # ── STEP 2: Graph Search ──
     tag_match = re.search(r'\[target:\s*([^\]]+)\]', query.lower() if query else "")
     if tag_match:
-        # Clean any potential spaces or underscores
         exact_compound = tag_match.group(1).strip()
         cleaned_words = [exact_compound]
-        logger.info(f"[Retriever Strict Match] Isolated visual target compound: {cleaned_words}")
     else:
-        # Standard text chat fallback tokenization
         cleaned_words = list(set(re.findall(r'\b\w{4,}\b', query.lower() if query else "")))
         if not cleaned_words:
             cleaned_words = [query.lower()] if query else [""]
 
-    # Kueri Utama: Jalur pencarian mandiri (Herb dan Compound dipisah)
-    cypher = """
-    // Jalur 1: Cari Herb langsung jika kata kunci cocok dengan nama tanaman
-    OPTIONAL MATCH (h:Herb)
-    WHERE any(w IN $words WHERE toLower(h.name) CONTAINS w OR w CONTAINS toLower(h.name))
+    p_enum = _normalize_persona(persona)
 
-    // Jalur 2: Cari Compound jika kata kunci cocok dengan nama senyawa gambar (e.g. Curcumin)
-    OPTIONAL MATCH (c:Compound)
-    WHERE any(w IN $words WHERE toLower(c.name) CONTAINS w OR w CONTAINS toLower(c.name))
-    // Hubungkan senyawa yang cocok ke node Herb induknya
-    OPTIONAL MATCH (h2:Herb)-[:HAS_COMPOUND]->(c)
+    # Dual-Path query optimized for schema properties and persona profiles
+    if p_enum == Persona.UMUM:
+        cypher = """
+        OPTIONAL MATCH (h:Herb)
+        WHERE any(w IN $words WHERE toLower(h.commonName) CONTAINS w OR w CONTAINS toLower(h.commonName))
+        OPTIONAL MATCH (c:Compound)
+        WHERE any(w IN $words WHERE toLower(c.name) CONTAINS w OR w CONTAINS toLower(c.name))
+        OPTIONAL MATCH (h2:Herb)-[:HAS_COMPOUND]->(c)
+        WITH collect(DISTINCT h) + collect(DISTINCT h2) AS merged_herbs
+        UNWIND merged_herbs AS final_herb
+        WITH DISTINCT final_herb WHERE final_herb IS NOT NULL
+        OPTIONAL MATCH (final_herb)-[:USED_FOR]->(t:TherapeuticUse)
+        RETURN final_herb.commonName AS topik,
+               final_herb.macroscopicDesc AS deskripsi,
+               collect(DISTINCT t.name) AS manfaat
+        LIMIT $limit
+        """
+    elif p_enum == Persona.PELAJAR:
+        cypher = """
+        OPTIONAL MATCH (h:Herb)
+        WHERE any(w IN $words WHERE toLower(h.commonName) CONTAINS w OR w CONTAINS toLower(h.commonName))
+        OPTIONAL MATCH (c:Compound)
+        WHERE any(w IN $words WHERE toLower(c.name) CONTAINS w OR w CONTAINS toLower(c.name))
+        OPTIONAL MATCH (h2:Herb)-[:HAS_COMPOUND]->(c)
+        WITH collect(DISTINCT h) + collect(DISTINCT h2) AS merged_herbs
+        UNWIND merged_herbs AS final_herb
+        WITH DISTINCT final_herb WHERE final_herb IS NOT NULL
+        OPTIONAL MATCH (final_herb)-[:HAS_COMPOUND]->(comp:Compound)
+        RETURN final_herb.commonName AS topik,
+               final_herb.simplisiaName AS simplisia,
+               collect(DISTINCT comp.name) AS konsep_kunci
+        LIMIT $limit
+        """
+    elif p_enum == Persona.PENELITI:
+        cypher = """
+        OPTIONAL MATCH (h:Herb)
+        WHERE any(w IN $words WHERE toLower(h.commonName) CONTAINS w OR w CONTAINS toLower(h.commonName))
+        OPTIONAL MATCH (c:Compound)
+        WHERE any(w IN $words WHERE toLower(c.name) CONTAINS w OR w CONTAINS toLower(c.name))
+        OPTIONAL MATCH (h2:Herb)-[:HAS_COMPOUND]->(c)
+        WITH collect(DISTINCT h) + collect(DISTINCT h2) AS merged_herbs
+        UNWIND merged_herbs AS final_herb
+        WITH DISTINCT final_herb WHERE final_herb IS NOT NULL
+        OPTIONAL MATCH (final_herb)-[:HAS_COMPOUND]->(comp:Compound)
+        OPTIONAL MATCH (final_herb)-[:HAS_PROTEIN_TARGET]->(pt:ProteinTarget)
+        RETURN final_herb.commonName AS topik,
+               collect(DISTINCT comp.name) AS marker_compounds,
+               collect(DISTINCT pt.name) AS target_protein
+        LIMIT $limit
+        """
+    else: # Tenaga Medis
+        cypher = """
+        OPTIONAL MATCH (h:Herb)
+        WHERE any(w IN $words WHERE toLower(h.commonName) CONTAINS w OR w CONTAINS toLower(h.commonName))
+        OPTIONAL MATCH (c:Compound)
+        WHERE any(w IN $words WHERE toLower(c.name) CONTAINS w OR w CONTAINS toLower(c.name))
+        OPTIONAL MATCH (h2:Herb)-[:HAS_COMPOUND]->(c)
+        WITH collect(DISTINCT h) + collect(DISTINCT h2) AS merged_herbs
+        UNWIND merged_herbs AS final_herb
+        WITH DISTINCT final_herb WHERE final_herb IS NOT NULL
+        OPTIONAL MATCH (final_herb)-[:HAS_TOXICITY]->(tox:ToxicityCategory)
+        OPTIONAL MATCH (final_herb)-[:USED_FOR]->(t:TherapeuticUse)
+        RETURN final_herb.commonName AS topik,
+               collect(DISTINCT t.name) AS indikasi,
+               collect(DISTINCT tox.name) AS safety
+        LIMIT $limit
+        """
 
-    // Gabungkan hasil tanaman dari Jalur 1 dan Jalur 2 secara aman
-    WITH collect(DISTINCT h) + collect(DISTINCT h2) AS merged_herbs
-    UNWIND merged_herbs AS final_herb
-    WITH DISTINCT final_herb WHERE final_herb IS NOT NULL
+    graph_results = _graph_search(query, cypher, words=cleaned_words, limit=graph_limit)
 
-    // Ambil seluruh daftar senyawa aktif dari tanaman yang terpilih untuk konteks LLM
-    OPTIONAL MATCH (final_herb)-[:HAS_COMPOUND]->(comp:Compound)
-    RETURN final_herb.name AS topik, final_herb.name AS deskripsi,
-           collect(DISTINCT comp.name) AS konsep_kunci
-    LIMIT 5
-    """
-    graph_results = _graph_search(query, cypher, words=cleaned_words)
-
-    # Fallback Kueri: Jika jalur independen kosong, gunakan pencarian string pencocokan jarak longgar
+    # Fallback to loose matching if dual-path empty
     if not graph_results:
         logger.info("[Retriever Fallback] Dual-path graph search returned 0 rows. Retrying with loose text matching.")
-        fallback_cypher = """
-        MATCH (h:Herb)
-        WHERE toLower(h.name) CONTAINS toLower($query) OR toLower($query) CONTAINS toLower(h.name)
-        OPTIONAL MATCH (h)-[:HAS_COMPOUND]->(c:Compound)
-        RETURN h.name AS topik, h.name AS deskripsi,
-               collect(DISTINCT c.name) AS konsep_kunci
-        LIMIT 5
-        """
-        graph_results = _graph_search(query, fallback_cypher)
-        
+        if p_enum == Persona.UMUM:
+            fallback_cypher = """
+            MATCH (h:Herb)
+            WHERE toLower(h.commonName) CONTAINS toLower($query) OR toLower($query) CONTAINS toLower(h.commonName)
+            OPTIONAL MATCH (h)-[:USED_FOR]->(t:TherapeuticUse)
+            RETURN h.commonName AS topik, h.macroscopicDesc AS deskripsi, collect(DISTINCT t.name) AS manfaat
+            LIMIT $limit
+            """
+        elif p_enum == Persona.PELAJAR:
+            fallback_cypher = """
+            MATCH (h:Herb)
+            WHERE toLower(h.commonName) CONTAINS toLower($query) OR toLower($query) CONTAINS toLower(h.commonName)
+            OPTIONAL MATCH (h)-[:HAS_COMPOUND]->(c:Compound)
+            RETURN h.commonName AS topik, h.simplisiaName AS simplisia, collect(DISTINCT c.name) AS konsep_kunci
+            LIMIT $limit
+            """
+        elif p_enum == Persona.PENELITI:
+            fallback_cypher = """
+            MATCH (h:Herb)
+            WHERE toLower(h.commonName) CONTAINS toLower($query) OR toLower($query) CONTAINS toLower(h.commonName)
+            OPTIONAL MATCH (h)-[:HAS_COMPOUND]->(c:Compound)
+            OPTIONAL MATCH (h)-[:HAS_PROTEIN_TARGET]->(pt:ProteinTarget)
+            RETURN h.commonName AS topik, collect(DISTINCT c.name) AS marker_compounds, collect(DISTINCT pt.name) AS target_protein
+            LIMIT $limit
+            """
+        else:
+            fallback_cypher = """
+            MATCH (h:Herb)
+            WHERE toLower(h.commonName) CONTAINS toLower($query) OR toLower($query) CONTAINS toLower(h.commonName)
+            OPTIONAL MATCH (h)-[:HAS_TOXICITY]->(tox:ToxicityCategory)
+            OPTIONAL MATCH (h)-[:USED_FOR]->(t:TherapeuticUse)
+            RETURN h.commonName AS topik, collect(DISTINCT t.name) AS indikasi, collect(DISTINCT tox.name) AS safety
+            LIMIT $limit
+            """
+        graph_results = _graph_search(query, fallback_cypher, limit=graph_limit)
+
     graph_text = _format_records_to_text(
         graph_results, "Relasi Graph Topik Edukasi"
     )

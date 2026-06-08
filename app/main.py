@@ -207,6 +207,31 @@ async def health_check() -> dict[str, str]:
     }
 
 
+@app.get("/api/health/models", tags=["System"])
+async def health_models_endpoint() -> dict[str, Any]:
+    """
+    Returns the list of available models and tiers.
+    """
+    return {
+        "models": [
+            {
+                "tier": "fast",
+                "label": "Fast Medium",
+                "model_id": settings.MODEL_FAST,
+                "available": True,
+                "provider": "hf_router"
+            },
+            {
+                "tier": "thinking",
+                "label": "Thinking High",
+                "model_id": settings.MODEL_THINKING,
+                "available": True,
+                "provider": "hf_router"
+            }
+        ]
+    }
+
+
 @app.get("/health", tags=["System"])
 async def detailed_health_check() -> dict[str, Any]:
     """

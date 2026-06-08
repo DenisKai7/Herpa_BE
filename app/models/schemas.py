@@ -84,6 +84,14 @@ class ChatRequest(BaseModel):
         None,
         description="Model LLM pilihan user berdasarkan role. Null = gunakan default role.",
     )
+    persona: Optional[str] = Field(
+        None,
+        description="Persona AI: umum, pelajar, peneliti, tenaga_medis",
+    )
+    model_tier: Optional[str] = Field(
+        None,
+        description="Model tier: fast, thinking",
+    )
     file_context: Optional[str] = Field(
         None,
         description="Teks hasil OCR dari file upload",
@@ -148,6 +156,7 @@ class ChatResponse(BaseModel):
     intent: str
     response: str
     quiz_data: Optional[dict[str, Any]] = None
+    metadata: Optional[dict[str, Any]] = None
 
 
 # ═══════════════════════════════════════════

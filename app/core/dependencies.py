@@ -21,90 +21,103 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════
-# ROLE-BASED MODEL ALLOWED LIST
+# PERSONA & MODEL TIER ROUTING DEFINITIONS
 # ═══════════════════════════════════════════
 
-# Maps Supabase profile role → list of allowed model setting values
-ROLE_ALLOWED_MODELS: dict[str, list[str]] = {
-    "tenaga_medis": [settings.MODEL_MEDIS_1, settings.MODEL_MEDIS_2],
-    "peneliti": [settings.MODEL_MEDIS_1, settings.MODEL_MEDIS_2],
-    "pelajar": [settings.MODEL_PELAJAR_1, settings.MODEL_PELAJAR_2],
-    "umum": [settings.MODEL_UMUM],
-    "user": [
-        settings.MODEL_UMUM,
-        settings.MODEL_PELAJAR_1,
-        settings.MODEL_PELAJAR_2,
-        settings.MODEL_MEDIS_1,
-        settings.MODEL_MEDIS_2,
-    ],
+from enum import Enum
+from pydantic import BaseModel
+
+class Persona(str, Enum):
+    UMUM = "umum"
+    PELAJAR = "pelajar"
+    PENELITI = "peneliti"
+    TENAGA_MEDIS = "tenaga_medis"
+
+class ModelTier(str, Enum):
+    FAST = "fast"
+    THINKING = "thinking"
+
+PERSONA_ALIASES = {
+    "umum": Persona.UMUM,
+    "general": Persona.UMUM,
+    "pelajar": Persona.PELAJAR,
+    "student": Persona.PELAJAR,
+    "peneliti": Persona.PENELITI,
+    "researcher": Persona.PENELITI,
+    "tenaga_medis": Persona.TENAGA_MEDIS,
+    "tenaga medis": Persona.TENAGA_MEDIS,
+    "medical": Persona.TENAGA_MEDIS,
 }
 
-# Maps role → default model (first in allowed list)
-ROLE_DEFAULT_MODEL: dict[str, str] = {
-    "tenaga_medis": settings.MODEL_MEDIS_1,
-    "peneliti": settings.MODEL_MEDIS_1,
-    "pelajar": settings.MODEL_PELAJAR_1,
-    "umum": settings.MODEL_UMUM,
-    "user": settings.MODEL_UMUM,
+class ModelRoute(BaseModel):
+    used_model: str
+    model_tier: ModelTier
+    requested_model: Optional[str] = None
+    provider: str = "hf_router"
+    fallback_used: bool = False
+
+LEGACY_UNSUPPORTED_MODELS = {
+    "google/gemma-2-9b-it",
+    "google/gemma-2-27b-it",
+    "Qwen/Qwen2.5-14B-Instruct",
 }
 
+def resolve_model(
+    model_tier: Optional[ModelTier] = None,
+    requested_model: Optional[str] = None,
+) -> ModelRoute:
+    """
+    Resolve model based on model_tier and requested_model with legacy normalization.
+    """
+    fallback_used = False
+    resolved_tier = ModelTier.FAST
+
+    # 1. Normalize legacy models first
+    normalized_model = requested_model
+    if requested_model in LEGACY_UNSUPPORTED_MODELS:
+        fallback_used = True
+        if requested_model == "google/gemma-2-9b-it":
+            normalized_model = settings.MODEL_FAST
+            resolved_tier = ModelTier.FAST
+        else:
+            normalized_model = settings.MODEL_THINKING
+            resolved_tier = ModelTier.THINKING
+        logger.warning(
+            f"Legacy unsupported model normalized: requested={requested_model} resolved={normalized_model}"
+        )
+    else:
+        # Determine tier from model_tier or model ID
+        if model_tier == ModelTier.THINKING or normalized_model == settings.MODEL_THINKING:
+            resolved_tier = ModelTier.THINKING
+        elif model_tier == ModelTier.FAST or normalized_model == settings.MODEL_FAST:
+            resolved_tier = ModelTier.FAST
+        else:
+            resolved_tier = ModelTier.FAST
+
+    # 2. Select final model ID
+    if resolved_tier == ModelTier.THINKING:
+        used_model = settings.MODEL_THINKING
+    else:
+        used_model = settings.MODEL_FAST
+
+    return ModelRoute(
+        used_model=used_model,
+        model_tier=resolved_tier,
+        requested_model=requested_model,
+        provider="hf_router",
+        fallback_used=fallback_used
+    )
 
 def resolve_model_for_role(role: str, model_choice: Optional[str] = None) -> str:
     """
-    Validasi dan resolusi model berdasarkan role user.
-
-    Guardrail logic:
-    - Jika model_choice kosong/None -> gunakan default model untuk role.
-    - Jika model_choice ada di config -> gunakan model_choice (bypass role-gating).
-    - Jika model_choice ada tapi tidak termasuk allowed list role -> fallback ke default.
-    - Jika model_choice valid untuk role -> gunakan model_choice.
-
-    Args:
-        role: Role user dari tabel profiles (tenaga_medis/peneliti/pelajar/umum).
-        model_choice: Model pilihan dari frontend (opsional).
-
-    Returns:
-        String model identifier yang sudah tervalidasi.
+    Wrapper for backward compatibility.
     """
-    default_model = ROLE_DEFAULT_MODEL.get(role, settings.LLM_DEFAULT_MODEL)
-    allowed_models = ROLE_ALLOWED_MODELS.get(role, [settings.LLM_DEFAULT_MODEL])
+    tier = ModelTier.FAST
+    if model_choice == settings.MODEL_THINKING or role in ("tenaga_medis", "peneliti"):
+        tier = ModelTier.THINKING
 
-    if not model_choice or model_choice.strip() == "":
-        logger.info(
-            f"No model_choice provided for role '{role}', "
-            f"using default: {default_model}"
-        )
-        return default_model
-
-    model_choice_stripped = model_choice.strip()
-    configured_models = {
-        settings.LLM_DEFAULT_MODEL,
-        settings.MODEL_MEDIS_1,
-        settings.MODEL_MEDIS_2,
-        settings.MODEL_PELAJAR_1,
-        settings.MODEL_PELAJAR_2,
-        settings.MODEL_UMUM,
-        settings.VLM_MODEL,
-    }
-
-    if model_choice_stripped in configured_models:
-        logger.info(
-            f"Model '{model_choice_stripped}' is configured in settings. "
-            f"Bypassing role-gating for role '{role}'."
-        )
-        return model_choice_stripped
-
-    if model_choice in allowed_models:
-        logger.info(
-            f"Model '{model_choice}' authorized for role '{role}'."
-        )
-        return model_choice
-
-    logger.warning(
-        f"Model '{model_choice}' NOT authorized for role '{role}'. "
-        f"Allowed: {allowed_models}. Falling back to default: {default_model}"
-    )
-    return default_model
+    route = resolve_model(tier, model_choice)
+    return route.used_model
 
 
 async def verify_user(authorization: Optional[str] = Header(None)) -> str:
