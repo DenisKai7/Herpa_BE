@@ -146,3 +146,33 @@ def classify_intent(query: str) -> str:
             return _keyword_fallback(query)
 
     return _keyword_fallback(query)
+
+
+def classify_attachment_intent(query: str, attachment: str) -> str:
+    """
+    Mengklasifikasikan intent khusus untuk request yang memiliki attachment.
+    """
+    query_lower = query.lower()
+
+    if any(k in query_lower for k in ["tanaman apa", "molekul apa", "senyawa apa", "herbal apa", "nama senyawa", "struktur apa", "what compound", "what molecule", "dari tanaman"]):
+        return "identify_compound_from_attachment"
+
+    if any(k in query_lower for k in ["identifikasi", "identify", "senyawa", "molekul", "compound", "molecule"]):
+        return "identify_compound"
+
+    if any(k in query_lower for k in ["ringkaskan", "rangkum", "summarize", "summary", "ikhtisar"]):
+        return "summarize_document"
+
+    if any(k in query_lower for k in ["tabel", "table", "kolom", "column", "baris", "row"]):
+        return "analyze_table"
+
+    if any(k in query_lower for k in ["rumus", "persamaan", "formula", "reaksi", "equation"]):
+        return "analyze_formula"
+
+    if any(k in query_lower for k in ["ekstrak", "ambil data", "extract"]):
+        return "extract_document"
+
+    if any(k in query_lower for k in ["apa", "bagaimana", "mengapa", "tanya", "siapa", "kapan", "?", "how", "what", "why"]):
+        return "question_answering_document"
+
+    return "analyze_attachment"

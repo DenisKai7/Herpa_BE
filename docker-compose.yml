@@ -1,46 +1,56 @@
-# ═══════════════════════════════════════════════════════
-# Docker Compose - Medical AI Full Stack (Fix Hostname Version)
-# Services: Backend (FastAPI), Neo4j, Redis, MinIO
-# Supabase dijalankan sebagai managed service (cloud)
-# ═══════════════════════════════════════════════════════
-
-version: "3.8"
-
 services:
-  # ── FastAPI Backend ──
   medical_backend:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.backend
+    image: medical-backend:local
     container_name: medical_backend
     restart: unless-stopped
     ports:
       - "8000:8000"
     env_file:
       - .env
-    volumes:
-      - model_cache:/root/.cache    # Cache embedding model
-      - ./data:/app/data            # Dataset & training data
-      - ./app:/app/app              # Live-reload source code (dev)
-      - ./.env:/app/.env            # Live-reload env config (dev)
+    environment:
+      OCR_WORKER_URL: http://medical_ocr_worker:8010
     depends_on:
-      medical_neo4j:
-        condition: service_healthy
       medical_redis:
-        condition: service_healthy
-      medical-minio:                # <── Disesuaikan menggunakan tanda hubung
+        condition: service_started
+      medical_neo4j:
+        condition: service_started
+      medical-minio:
         condition: service_started
     networks:
       - medical_network
 
-  # ── Neo4j Graph Database ──
+  medical_ocr_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.ocr
+    image: medical-ocr-worker:cpu-v1
+    container_name: medical_ocr_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      OCR_DEVICE: cpu
+      OCR_DTYPE: float32
+      OCR_LAZY_LOAD: "true"
+      HF_HOME: /models/huggingface
+      TRANSFORMERS_CACHE: /models/huggingface
+    volumes:
+      - hf_cache:/models/huggingface
+    expose:
+      - "8010"
+    networks:
+      - medical_network
+
   medical_neo4j:
     image: neo4j:5.23-community
     container_name: medical_neo4j
     restart: unless-stopped
     ports:
-      - "7474:7474"     # Neo4j Browser
-      - "7687:7687"     # Bolt protocol
+      - "7474:7474"
+      - "7687:7687"
     environment:
       - NEO4J_AUTH=neo4j/neo4jpassword123
       - NEO4J_PLUGINS=["apoc"]
@@ -58,7 +68,6 @@ services:
     networks:
       - medical_network
 
-  # ── Redis (Rate Limiting) ──
   medical_redis:
     image: redis:7-alpine
     container_name: medical_redis
@@ -76,14 +85,13 @@ services:
     networks:
       - medical_network
 
-  # ── MinIO (Object Storage for file uploads - Fix Hostname) ──
-  medical-minio:                    # <── Diubah menjadi tanda hubung agar lolos validasi RFC Hostname
+  medical-minio:
     image: minio/minio:latest
-    container_name: medical-minio   # <── Diubah menjadi tanda hubung
+    container_name: medical-minio
     restart: unless-stopped
     ports:
-      - "9000:9000"     # API
-      - "9001:9001"     # Console
+      - "9000:9000"
+      - "9001:9001"
     environment:
       - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
       - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
@@ -93,15 +101,13 @@ services:
     networks:
       - medical_network
 
-# ── Volumes ──
 volumes:
   neo4j_data:
   neo4j_logs:
   redis_data:
   minio_data:
-  model_cache:
+  hf_cache:
 
-# ── Network ──
 networks:
   medical_network:
     driver: bridge

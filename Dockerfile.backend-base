@@ -1,0 +1,25 @@
+# syntax=docker/dockerfile:1.7
+
+FROM python:3.11-slim-bookworm AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=300
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-core.lock /tmp/requirements-core.lock
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --upgrade pip \
+    && python -m pip install -r /tmp/requirements-core.lock
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:8000/ || exit 1

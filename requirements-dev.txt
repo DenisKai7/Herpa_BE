@@ -1,0 +1,6 @@
+-r requirements-core.txt
+pytest
+pytest-asyncio
+ruff
+mypy
+pip-tools

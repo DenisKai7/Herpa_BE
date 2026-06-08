@@ -31,6 +31,13 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+logger.info(
+    "Settings loaded: app_name=%s version=%s debug=%s",
+    settings.APP_NAME,
+    settings.APP_VERSION,
+    settings.DEBUG,
+)
+logger.info("Settings source file: %s", __file__)
 
 
 # ═══════════════════════════════════════════
@@ -276,3 +283,43 @@ async def detailed_health_check() -> dict[str, Any]:
         health["status"] = "degraded"
 
     return health
+@app.get("/api/health/multimodal", tags=["System"])
+async def health_multimodal_endpoint() -> dict[str, Any]:
+    """Healthcheck multimodal tanpa menjalankan OCR generation."""
+    from app.agent.multimodal import ocr_service
+    from app.agent.verification import get_neo4j_schema_map
+    from app.core.minio_client import minio_client as mc
+
+    neo4j_available = False
+    schema_loaded = False
+    try:
+        neo4j_available = verify_neo4j_connection()
+        schema = await get_neo4j_schema_map()
+        schema_loaded = bool(schema.compound_labels or schema.herb_labels)
+    except Exception:
+        neo4j_available = False
+        schema_loaded = False
+
+    minio_available = False
+    try:
+        mc.bucket_exists(settings.MINIO_BUCKET)
+        minio_available = True
+    except Exception:
+        minio_available = False
+
+    return {
+        "ocr": {
+            "worker_url": settings.OCR_WORKER_URL,
+            "model_id": settings.OCR_MODEL_ID,
+            "loaded": getattr(ocr_service, "_model", None) is not None,
+            "device": getattr(ocr_service, "_device", None) or "worker",
+            "available": settings.OCR_WORKER_ENABLED,
+        },
+        "neo4j": {
+            "available": neo4j_available,
+            "schema_loaded": schema_loaded,
+        },
+        "storage": {
+            "minio_available": minio_available,
+        },
+    }

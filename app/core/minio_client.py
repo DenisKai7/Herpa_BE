@@ -1,7 +1,7 @@
-"""
+﻿"""
 MinIO Object Storage Client.
 
-Reads credentials directly from os.getenv() — intentionally bypasses the
+Reads credentials directly from os.getenv() â€” intentionally bypasses the
 Pydantic settings layer to guarantee no intermediate transformation can
 inject a protocol prefix into the endpoint string.
 
@@ -12,18 +12,26 @@ Passing 'http://host:port' causes S3Error: Invalid Request (invalid hostname).
 import logging
 import os
 
-from minio import Minio
+try:
+    from minio import Minio
+except Exception as minio_import_error:
+    _MINIO_IMPORT_ERROR = minio_import_error
+    class Minio:
+        def __init__(self, *args, **kwargs):
+            self._error = _MINIO_IMPORT_ERROR
+        def __getattr__(self, name):
+            raise RuntimeError("MinIO client unavailable") from self._error
 
 logger = logging.getLogger(__name__)
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # MINIO CLIENT (Object Storage)
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 # Step 1: Read raw endpoint directly from environment
 raw_endpoint = os.getenv("MINIO_ENDPOINT", "minio:9000")
 
-# Step 2: Defensive parsing — strip protocol schemes and trailing paths
+# Step 2: Defensive parsing â€” strip protocol schemes and trailing paths
 cleaned_endpoint = raw_endpoint.replace("http://", "").replace("https://", "")
 cleaned_endpoint = cleaned_endpoint.split("/")[0].strip()
 
@@ -34,7 +42,7 @@ minio_client = Minio(
     cleaned_endpoint,
     access_key=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
     secret_key=os.getenv("MINIO_SECRET_KEY", "minioadmin"),
-    secure=False,  # Force False — local Docker Compose runs plain HTTP
+    secure=False,  # Force False â€” local Docker Compose runs plain HTTP
 )
 
 logger.info(

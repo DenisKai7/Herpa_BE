@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1.7
+
+FROM medical-backend-base:py311-v1 AS runtime
+
+WORKDIR /app
+
+COPY app /app/app
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

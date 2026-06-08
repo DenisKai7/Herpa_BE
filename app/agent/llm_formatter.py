@@ -1,4 +1,4 @@
-"""
+﻿"""
 LLM Formatter - Generates AI responses using HuggingFace Inference API.
 """
 
@@ -13,17 +13,17 @@ from app.agent.resolver import resolve_plant_identity
 
 logger = logging.getLogger(__name__)
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # LLM CLIENT (Singleton) - HuggingFace Inference API
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 _client = InferenceClient(
     provider="auto",
     api_key=settings.HF_API_TOKEN,
 )
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # MODEL REGISTRY
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 MODEL_REGISTRY = {
     ModelTier.FAST: {
         "model_id": settings.MODEL_FAST,
@@ -47,9 +47,9 @@ MODEL_REGISTRY = {
     },
 }
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # BASE SYSTEM PROMPT
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 BASE_SYSTEM_PROMPT = """
 Anda adalah MedBot AI, sistem Agentic AI untuk edukasi,
 riset, farmasi, farmakologi, farmakognosi, dan tanaman herbal.
@@ -74,9 +74,9 @@ Untuk risiko serius atau red flags, sarankan pemeriksaan profesional.
 Gunakan bahasa Indonesia sesuai persona.
 """
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # PERSONA PROMPTS
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 PERSONA_PROMPTS = {
     Persona.UMUM: """PERSONA: UMUM
 
@@ -193,9 +193,9 @@ STRUCTURE_INSTRUCTIONS = {
     Persona.TENAGA_MEDIS: "\n\nUntuk pertanyaan yang relevan, susun jawaban dengan struktur berikut:\n1. Ringkasan Klinis\n2. Kandungan atau Marker Utama\n3. Farmakodinamik\n4. Farmakokinetik\n5. Indikasi Tradisional dan Bukti Klinis\n6. Kontraindikasi\n7. Interaksi Obat-Herbal\n8. Efek Samping\n9. Populasi Khusus\n10. Monitoring\n11. Red Flags\n12. Kualitas Bukti"
 }
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # MODEL TIER PROMPTS
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 MODEL_TIER_PROMPTS = {
     ModelTier.FAST: """MODE: FAST MEDIUM
 
@@ -261,8 +261,8 @@ def _build_system_prompt(
     )
 
     system_message = BASE_SYSTEM_PROMPT
-    system_message += f"\n═══ {persona_prompt} ═══"
-    system_message += f"\n\n═══ {tier_prompt} ═══"
+    system_message += f"\nâ•â•â• {persona_prompt} â•â•â•"
+    system_message += f"\n\nâ•â•â• {tier_prompt} â•â•â•"
 
     # Plant identity resolution & verification injection
     identity = resolve_plant_identity(query)
@@ -270,7 +270,7 @@ def _build_system_prompt(
         synonyms_str = ", ".join(identity.synonyms) if identity.synonyms else "Tidak tersedia"
         system_message += f"""
 
-═══ VALIDASI IDENTITAS TANAMAN (CANONICAL FACTS) ═══
+â•â•â• VALIDASI IDENTITAS TANAMAN (CANONICAL FACTS) â•â•â•
 Nama Lokal: {identity.local_name}
 Nama Ilmiah: {identity.scientific_name or 'Tidak tersedia'}
 Famili: {identity.family or 'Tidak tersedia'}
@@ -278,31 +278,27 @@ Sinonim: {synonyms_str}
 
 Peraturan Mutlak: Anda WAJIB menggunakan identitas ilmiah di atas jika membahas tentang tanaman tersebut. Dilarang keras menukar nama ilmiah atau mencampurkannya dengan spesies lain (misal: dilarang keras mencampurkan Curcuma xanthorrhiza dengan Curcuma zedoaria atau Curcuma longa)."""
 
-    system_message += f"\n\n═══ INSTRUKSI INTENT: {intent.upper()} ═══\n{intent_instruction}"
+    system_message += f"\n\nâ•â•â• INSTRUKSI INTENT: {intent.upper()} â•â•â•\n{intent_instruction}"
     system_message += structure_instruction
 
     if file_context and file_context.strip():
-        file_context_buffer = file_context[:3000]
-        system_message += f"\n\n[DATA VISUAL GAMBAR DARI USER]\n{file_context_buffer.strip()}\n"
+        file_context_buffer = file_context[:12000]
+        system_message += f"\n\n{file_context_buffer.strip()}\n"
         system_message += (
-            "\n═══ ATURAN KERAS REKONSILIASI KONTEKS MULTIMODAL ═══\n"
-            "Jika pengguna menyertakan data berkas gambar/visual (file_context), Anda WAJIB melakukan audit silang antara deskripsi visual gambar dengan artikel teks database (database_context):\n\n"
-            "- Evaluasi Ciri Fisik Struktur: Jika deskripsi gambar (file_context) menjelaskan molekul dengan SATU cincin fenol/benzena dengan rantai seskuiterpenoid (seperti Xanthorrhizol), tetapi teks database (database_context) malah memberikan artikel tentang molekul simetris DUA cincin (seperti Kurkumin), Anda TIDAK BOLEH memuntahkan isi artikel database tersebut secara mentah-mentah.\n\n"
-            "- Pengambilan Keputusan: Prioritaskan karakteristik visual gambar nyata yang dikirim user. Jelaskan kepada user bahwa berdasarkan bentuk struktur kimianya, molekul tersebut adalah senyawa yang sesuai dengan ciri visual (misal: Xanthorrhizol dari Temulawak), walaupun pustaka teks mengalami pergeseran pencarian semantik.\n\n"
-            "- Hierarki Otoritas Konteks: [DATA VISUAL GAMBAR DARI USER] > [DATA DATABASE]. Jika keduanya bertentangan, deskripsi visual gambar SELALU menang karena merepresentasikan data riil yang dikirim user.\n\n"
-            "PERINTAH MUTLAK MODEL 3B:\n"
-            "1. JANGAN gunakan salam pembuka seperti 'Hey there! Let's talk...'. Langsung jawab inti pertanyaan dalam Bahasa Indonesia.\n"
-            "2. User bertanya tentang gambar senyawa/tanaman obat di atas. Gunakan [DATA VISUAL GAMBAR DARI USER] untuk mengidentifikasi nama senyawa kimia atau tanaman herbal tersebut secara langsung.\n"
-            "3. Jawab dalam 2-3 kalimat yang padat, jelas, dan valid dalam Bahasa Indonesia. Pastikan semua tanda baca bold (**) ditutup sempurna sebelum menyelesaikan generasi teks.\n"
-            "4. DILARANG menjawab dalam bahasa Inggris. Semua output WAJIB Bahasa Indonesia.\n"
-            "5. Jika ciri visual gambar BERTENTANGAN dengan isi artikel database, ikuti ciri visual gambar dan jelaskan perbedaannya secara edukatif kepada mahasiswa."
+            "\nATURAN KERAS KONTEKS ATTACHMENT:\n"
+            "- Jawab berdasarkan ATTACHMENT EVIDENCE dan Neo4j evidence di atas.\n"
+            "- Prioritas konteks: attachment user saat ini, chunk attachment chat saat ini, Neo4j verification, Supabase RAG, corpus internal, lalu pengetahuan model.\n"
+            "- Jika verification_status bukan verified, jangan menyatakan identitas senyawa/tanaman sebagai pasti. Gunakan istilah seperti 'kandidat', 'paling konsisten', atau 'belum cukup bukti'.\n"
+            "- Jika gambar berupa skeletal chemical structure, GOT-OCR2 hanya membaca label/angka/teks visual. Jangan mengarang SMILES, InChI, tanaman asal, khasiat klinis, atau diagnosis dari bentuk struktur saja.\n"
+            "- Jika bukti attachment dan database bertentangan, jelaskan konflik, turunkan confidence, dan sebutkan data tambahan yang dibutuhkan.\n"
+            "- Jika OCR/Neo4j gagal, tetap jawab bagian yang terbaca sebagai hasil sementara dengan keterbatasan eksplisit.\n"
+            "- Semua output wajib Bahasa Indonesia dan sesuai persona.\n"
         )
-
     system_message += f"""
 
-═══ DATA DATABASE MULAI ═══
+â•â•â• DATA DATABASE MULAI â•â•â•
 {context}
-═══ DATA DATABASE SELESAI ═══"""
+â•â•â• DATA DATABASE SELESAI â•â•â•"""
 
     return system_message
 
@@ -421,11 +417,11 @@ def generate_structured_recommendation(
     system_prompt = f"""Anda adalah Sistem AI Asisten Klinis dan Pakar Fitokimia Medis Tingkat Tinggi.
 Tugas Anda adalah memberikan rekomendasi tanaman obat/herbal berdasarkan keluhan/gejala pasien.
 
-═══ DATA DATABASE KONSULTASI ═══
+â•â•â• DATA DATABASE KONSULTASI â•â•â•
 {context}
-═══ AKHIR DATA DATABASE ═══
+â•â•â• AKHIR DATA DATABASE â•â•â•
 
-═══ PETUNJUK FORMAT JAWABAN ═══
+â•â•â• PETUNJUK FORMAT JAWABAN â•â•â•
 Anda WAJIB menghasilkan output dalam format JSON array yang VALID. Setiap objek dalam array merepresentasikan tanaman obat pendukung dan harus memiliki struktur berikut secara persis:
 {{
   "tanaman": "Nama populer tanaman obat dalam Bahasa Indonesia",
@@ -436,7 +432,7 @@ Anda WAJIB menghasilkan output dalam format JSON array yang VALID. Setiap objek 
   "peringatan": "Kontraindikasi klinis, potensi efek samping, tingkat toksisitas, dan risiko jika berinteraksi dengan obat kimia/medis"
 }}
 
-═══ INSTRUKSI MUTLAK ═══
+â•â•â• INSTRUKSI MUTLAK â•â•â•
 1. HANYA gunakan informasi yang sahih dari data database di atas. Jangan mengarang informasi.
 2. Pastikan output hanya berupa JSON array. Dilarang menyertakan teks pembuka (seperti "Berikut adalah...", "Tentu saja...") atau teks penutup. Langsung berikan JSON array dimulai dengan [ dan diakhiri dengan ].
 3. Seluruh isi teks di dalam nilai properti harus ditulis menggunakan Bahasa Indonesia yang profesional dan akademis.
@@ -462,3 +458,4 @@ Anda WAJIB menghasilkan output dalam format JSON array yang VALID. Setiap objek 
     except Exception as e:
         logger.error(f"Structured recommendation generation failed: {e}", exc_info=True)
         return "[]"
+

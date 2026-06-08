@@ -1,249 +1,391 @@
 """
-Multimodal File Processor - Ekstraksi teks dari file upload (PDF, Image, TXT).
+Multimodal attachment helpers for backend-safe upload processing.
 
-Modul ini bertanggung jawab untuk:
-- Membaca file PDF menggunakan PyMuPDF (fitz).
-- Mengonversi gambar menjadi deskripsi kimia/medis analitis menggunakan Groq Vision API.
-- Membaca file teks biasa (TXT/CSV).
-
-Hasil ekstraksi digunakan sebagai file_context dalam pipeline AI.
+Heavy OCR/ML dependencies live in app.ocr_worker. This module must stay importable
+inside the main backend image without torch, transformers, PyMuPDF, Pillow, or pandas.
 """
 
-import base64
+from __future__ import annotations
+
+import hashlib
 import io
 import logging
-import os
-from typing import Final, Optional
+import re
+import time
+from typing import Any, Final, Optional
 
-import fitz  # PyMuPDF
-import httpx
-from PIL import Image
+from pydantic import BaseModel, Field
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ═══════════════════════════════════════════
-# KONSTANTA FILE PROCESSING
-# ═══════════════════════════════════════════
-
-# Ekstensi yang diizinkan, dikelompokkan berdasarkan tipe prosesor
 PDF_EXTENSIONS: Final[frozenset[str]] = frozenset({"pdf"})
-IMAGE_EXTENSIONS: Final[frozenset[str]] = frozenset({"jpg", "jpeg", "png", "webp"})
-TEXT_EXTENSIONS: Final[frozenset[str]] = frozenset({"txt"})
-ALL_ALLOWED_EXTENSIONS: Final[frozenset[str]] = PDF_EXTENSIONS | IMAGE_EXTENSIONS | TEXT_EXTENSIONS
+IMAGE_EXTENSIONS: Final[frozenset[str]] = frozenset({"jpg", "jpeg", "png", "webp", "bmp", "tiff"})
+TEXT_EXTENSIONS: Final[frozenset[str]] = frozenset({"txt", "md", "json"})
+DOCX_EXTENSIONS: Final[frozenset[str]] = frozenset({"docx"})
+EXCEL_CSV_EXTENSIONS: Final[frozenset[str]] = frozenset({"xlsx", "xls", "csv"})
 
-# MIME type mapping yang diizinkan (SECURITY: validasi ketat per brief)
+ALL_ALLOWED_EXTENSIONS: Final[frozenset[str]] = (
+    PDF_EXTENSIONS | IMAGE_EXTENSIONS | TEXT_EXTENSIONS | DOCX_EXTENSIONS | EXCEL_CSV_EXTENSIONS
+)
+
 ALLOWED_MIME_TYPES: Final[dict[str, frozenset[str]]] = {
     "application/pdf": PDF_EXTENSIONS,
     "image/jpeg": frozenset({"jpg", "jpeg"}),
     "image/png": frozenset({"png"}),
     "image/webp": frozenset({"webp"}),
-    "text/plain": TEXT_EXTENSIONS,
+    "image/bmp": frozenset({"bmp"}),
+    "image/tiff": frozenset({"tiff"}),
+    "text/plain": frozenset({"txt", "md"}),
+    "application/json": frozenset({"json"}),
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": DOCX_EXTENSIONS,
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": frozenset({"xlsx"}),
+    "application/vnd.ms-excel": frozenset({"xls"}),
+    "text/csv": frozenset({"csv"}),
 }
 
-# Batas maksimal karakter hasil ekstraksi untuk dikirim ke LLM
-MAX_EXTRACTED_CHARS: Final[int] = 15_000
+
+class OcrExtractionResult(BaseModel):
+    success: bool
+    raw_text: str = ""
+    normalized_text: str = ""
+    detected_type: str = "unknown"
+    visible_labels: list[str] = Field(default_factory=list)
+    chemical_terms: list[str] = Field(default_factory=list)
+    molecular_formulas: list[str] = Field(default_factory=list)
+    numeric_labels: list[str] = Field(default_factory=list)
+    document_sections: list[str] = Field(default_factory=list)
+    tables: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    warnings: list[str] = Field(default_factory=list)
+    model_id: str = "ocr-worker"
+    processing_ms: int = 0
 
 
-def validate_file_type(filename: str, content_type: str | None = None) -> str:
-    """
-    Validasi tipe file berdasarkan ekstensi dan opsional MIME type.
-    """
+class AttachmentAnalysisResult(BaseModel):
+    attachment_id: Optional[str] = None
+    filename: str
+    mime_type: str
+    file_sha256: str
+    extraction_method: str
+    extracted_text: str
+    structured_data: dict = Field(default_factory=dict)
+    detected_entities: list[dict] = Field(default_factory=list)
+    neo4j_candidates: list[dict] = Field(default_factory=list)
+    verification_status: str = "unverified"
+    confidence: float = 0.0
+    warnings: list[str] = Field(default_factory=list)
+    processing_ms: int
+
+
+class _LegacyOcrService:
+    async def extract(self, image, *, mode: str = "auto") -> OcrExtractionResult:
+        raise RuntimeError("ocr_worker_required")
+
+
+ocr_service = _LegacyOcrService()
+
+
+def validate_file_type(filename: str, content_type: str | None = None, content: bytes | None = None) -> str:
     if "." not in filename:
         raise ValueError(f"File '{filename}' tidak memiliki ekstensi.")
 
     ext = filename.rsplit(".", maxsplit=1)[-1].lower()
-
     if ext not in ALL_ALLOWED_EXTENSIONS:
         raise ValueError(
-            f"Format file '.{ext}' tidak didukung. "
-            f"Format yang diizinkan: {', '.join(sorted(ALL_ALLOWED_EXTENSIONS))}"
+            f"Format file '.{ext}' tidak didukung. Format yang diizinkan: {', '.join(sorted(ALL_ALLOWED_EXTENSIONS))}"
         )
 
-    # Validasi MIME type jika tersedia
+    if content is not None:
+        sniffed_mime = sniff_mime_type(content, filename)
+        if sniffed_mime not in ALLOWED_MIME_TYPES:
+            raise ValueError(f"MIME type dari isi file '{sniffed_mime}' tidak diizinkan.")
+        if ext not in ALLOWED_MIME_TYPES[sniffed_mime]:
+            raise ValueError(f"MIME type dari isi file '{sniffed_mime}' tidak cocok dengan ekstensi '.{ext}'.")
+
     if content_type:
         normalized_mime = content_type.split(";")[0].strip().lower()
         if normalized_mime not in ALLOWED_MIME_TYPES:
             raise ValueError(
-                f"MIME type '{normalized_mime}' tidak diizinkan. "
-                f"Tipe yang diterima: {', '.join(sorted(ALLOWED_MIME_TYPES.keys()))}"
+                f"MIME type '{normalized_mime}' tidak diizinkan. Tipe yang diterima: {', '.join(sorted(ALLOWED_MIME_TYPES.keys()))}"
             )
-        # Cross-check: MIME type harus sesuai dengan ekstensi
-        allowed_exts_for_mime = ALLOWED_MIME_TYPES[normalized_mime]
-        if ext not in allowed_exts_for_mime:
-            raise ValueError(
-                f"MIME type '{normalized_mime}' tidak cocok dengan ekstensi '.{ext}'."
-            )
+        if ext not in ALLOWED_MIME_TYPES[normalized_mime]:
+            raise ValueError(f"MIME type '{normalized_mime}' tidak cocok dengan ekstensi '.{ext}'.")
 
     return ext
 
 
-def encode_image_to_base64(file_bytes: bytes) -> str:
-    """
-    Membuat string Base64 yang bersih dari karakter whitespace tersembunyi
-    untuk mencegah eror 400 Bad Request pada API Gateway.
-    """
-    base64_encoded = base64.b64encode(file_bytes).decode("utf-8")
-    return base64_encoded.replace("\n", "").replace("\r", "").strip()
+def sniff_mime_type(content: bytes, filename: str = "") -> str:
+    head = content[:4096]
+    if head.startswith(b"%PDF"):
+        return "application/pdf"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith(b"RIFF") and b"WEBP" in head[:16]:
+        return "image/webp"
+    if head.startswith(b"BM"):
+        return "image/bmp"
+    if head.startswith((b"II*\x00", b"MM\x00*")):
+        return "image/tiff"
+    if content[:4] == b"PK\x03\x04":
+        import zipfile
 
-
-def _describe_image_with_vision(file_bytes: bytes) -> dict[str, str]:
-    """
-    Mendeskripsikan konten visual gambar menggunakan Groq Cloud API
-    dengan model dinamis dari konfigurasi.
-    """
-    # Deteksi MIME type dari header bytes
-    mime_type = "image/jpeg"
-    if file_bytes[:8].startswith(b"\x89PNG"):
-        mime_type = "image/png"
-    elif file_bytes[:4].startswith(b"RIFF") and file_bytes[8:12] == b"WEBP":
-        mime_type = "image/webp"
-
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                names = set(zf.namelist())
+                if "word/document.xml" in names:
+                    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                if "xl/workbook.xml" in names:
+                    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        except Exception:
+            pass
     try:
-        # Enkripsi ke Base64 string yang steril tanpa newline characters
-        base64_image_string = encode_image_to_base64(file_bytes)
-
-        # Instruksi prompt fitokimia ketat dengan pembagian struktural molekul
-        prompt_instruction = (
-            "Bertindaklah sebagai Ahli Spektroskopi dan Laboratorium Fitokimia. Analisis gambar struktur kimia ini dengan presisi tinggi.\n"
-            "Perhatikan ciri utama ini untuk mencegah salah tebak:\n"
-            "1. Cek Cincin Aromatik Benzena: Jika memiliki DUA cincin benzena simetris di ujung kiri dan kanan dengan gugus -OH dan -OCH3, ini adalah KURKUMIN / KURKUMINOID (Kunyit).\n"
-            "2. Cek Cincin Tunggal Fenolik: Jika hanya memiliki SATU cincin benzena fenolik (gugus -OH) yang terikat pada rantai hidrokarbon tidak jenuh seskuiterpenoid (rantai karbon dengan ikatan rangkap dua alkena), ini adalah XANTHORRHIZOL (Temulawak).\n"
-            "3. Cek Asimetris Gugus Alkil: Jika hanya memiliki SATU cincin aromatik benzena dengan rantai hidrokarbon lurus panjang yang mengandung gugus hidroksil dan keton jenuh, ini adalah GINGEROL (Jahe).\n\n"
-            "Tulis deskripsi ringkas dalam Bahasa Indonesia yang edukatif untuk mahasiswa farmasi/informatika.\n\n"
-            "CRITICAL REQUIREMENT: Di baris paling akhir dari jawaban Anda, Anda WAJIB menuliskan satu baris penutup dengan format kaku:\n"
-            "[TARGET: Nama_Senyawa_Murni]"
-        )
-
-        payload = {
-            "model": settings.VLM_MODEL,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt_instruction
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{mime_type};base64,{base64_image_string}"
-                            }
-                        }
-                    ]
-                }
-            ],
-            "temperature": 0.0,
-            "max_tokens": 800
-        }
-
-        headers = {
-            "Authorization": f"Bearer {settings.GROQ_API_TOKEN or settings.HF_API_TOKEN}",
-            "Content-Type": "application/json"
-        }
-
-        url = "https://api.groq.com/openai/v1/chat/completions"
-
-        logger.info(f"Calling Groq {settings.VLM_MODEL} with sanitized base64 sequence...")
-        response = httpx.post(url, json=payload, headers=headers, timeout=60.0)
-        
-        # Jika server menolak, tangkap isi teks penolakan aslinya untuk log terminal
-        if response.status_code != 200:
-            logger.error(f"Groq Cloud gateway rejected request. Error payload: {response.text}")
-            response.raise_for_status()
-
-        response_json = response.json()
-        generated_text = response_json["choices"][0]["message"]["content"]
-        return {"extracted_text_content": generated_text}
-
-    except Exception as e:
-        logger.warning(f"Vision LLM description failed: {e}", exc_info=True)
-        error_detail = f" (Details: {str(e)})"
-        if 'response' in locals() and hasattr(response, 'text'):
-            error_detail += f" | Server Response: {response.text}"
-
-        # Proteksi Fallback Bersih: Gagalkan tag target agar pencarian grafik tahu objek tidak terbaca
-        return {
-            "extracted_text_content": (
-                f"[TARGET: Unknown] Terdeteksi lampiran gambar berkas struktur kimia, "
-                f"namun sistem pemrosesan visual sedang sibuk.{error_detail}"
-            )
-        }
+        content[:8192].decode("utf-8")
+        return "text/plain"
+    except UnicodeDecodeError:
+        return "application/octet-stream"
 
 
-def _extract_from_pdf(file_bytes: bytes) -> str:
-    """
-    Mengekstrak teks dari file PDF menggunakan PyMuPDF.
-    """
+def preprocess_image(data: bytes):
     try:
-        pdf_document = fitz.open(stream=file_bytes, filetype="pdf")
-        pages_text: list[str] = []
-        for page_num in range(len(pdf_document)):
-            page_text = pdf_document[page_num].get_text("text")
-            if page_text.strip():
-                pages_text.append(page_text)
-        pdf_document.close()
+        from PIL import Image, ImageOps
+    except Exception as exc:
+        raise RuntimeError("Pillow tidak tersedia di backend utama; gunakan OCR worker.") from exc
 
-        logger.info(f"PDF extracted: {len(pages_text)} pages with text content.")
-        return "\n".join(pages_text)
-    except Exception as e:
-        logger.error(f"PDF extraction failed: {e}", exc_info=True)
-        raise RuntimeError(f"Gagal membaca file PDF: {e}") from e
+    Image.MAX_IMAGE_PIXELS = settings.OCR_MAX_IMAGE_PIXELS
+    try:
+        with Image.open(io.BytesIO(data)) as verifier:
+            verifier.verify()
+        image = Image.open(io.BytesIO(data))
+        image = ImageOps.exif_transpose(image)
+        image = image.convert("RGB")
+    except Exception as exc:
+        raise ValueError("corrupt_image") from exc
+
+    if image.width * image.height > settings.OCR_MAX_IMAGE_PIXELS:
+        logger.info("Image pixels exceed limit (%sx%s), resizing", image.width, image.height)
+        image.thumbnail((4096, 4096))
+    return image
 
 
-def _extract_from_image(file_bytes: bytes) -> str:
-    """
-    Mengekstrak deskripsi visual gambar menggunakan Vision LLM.
-    """
-    result = _describe_image_with_vision(file_bytes)
-    return result["extracted_text_content"]
+def calculate_sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def _extract_from_text(file_bytes: bytes) -> str:
-    """
-    Membaca konten file teks biasa.
-    """
     try:
         return file_bytes.decode("utf-8")
     except UnicodeDecodeError:
-        try:
-            return file_bytes.decode("latin-1")
-        except Exception as e:
-            logger.error(f"Text file decode failed: {e}", exc_info=True)
-            raise RuntimeError(f"Gagal membaca file teks: {e}") from e
+        return file_bytes.decode("latin-1")
 
 
-def extract_text_from_file(
-    file_bytes: bytes,
+def classify_extracted_text(text: str) -> dict[str, Any]:
+    word_count = len(text.split())
+    chemical_symbols = list(set(re.findall(r"\b(OH|COOH|NH2|CH3|OCH3|CH2|C\d+H\d+|H2O|CO2)\b", text)))
+    molecular_formulas = list(set(re.findall(r"\b[CNO SPHFIBrcl]{1,8}\d+[A-Za-z0-9]*\b", text)))
+    molecular_formulas = [f for f in molecular_formulas if any(c.isdigit() for c in f) and len(f) > 2]
+    chemical_terms = list(set(re.findall(r"\b(flavonoid|alkaloid|saponin|tannin|curcumin|gingerol|xanthorrhizol|terpenoid|steroid|glycoside|phenolic)\b", text.lower())))
+    numeric_labels = list(set(re.findall(r"\b\d{1,2}\b", text)))
+    has_table = "|" in text and text.count("|") > 4
+    tables = [line for line in text.splitlines() if "|" in line] if has_table else []
+    sections = [line.strip() for line in text.splitlines() if re.match(r"^(bab|chapter|section|abstrak|abstract|daftar|tabel|gambar|\d+\.)", line.lower().strip())]
+
+    detected_type = "unknown"
+    if has_table or any(k in text.lower() for k in ["table", "tabel"]):
+        detected_type = "table"
+    elif len(chemical_symbols) > 1 or molecular_formulas or any(k in text.lower() for k in ["benzene", "cincin", "skeletal", "structure"]):
+        detected_type = "chemical_structure_diagram"
+    elif any(k in text.lower() for k in ["equation", "persamaan", "formula"]) and any(s in text for s in ["+", "=", "-", "*", "/"]):
+        detected_type = "mathematical_formula"
+    elif word_count > 100:
+        detected_type = "scanned_document"
+    elif word_count > 0:
+        detected_type = "plain_text"
+
+    return {
+        "detected_type": detected_type,
+        "chemical_symbols": chemical_symbols,
+        "molecular_formulas": molecular_formulas,
+        "chemical_terms": chemical_terms,
+        "numeric_labels": numeric_labels,
+        "document_sections": sections,
+        "tables": tables,
+    }
+
+
+def _analysis_from_ocr_result(*, filename: str, mime_type: str, content: bytes, result: OcrExtractionResult, method: str) -> AttachmentAnalysisResult:
+    heuristics = classify_extracted_text(result.raw_text)
+    structured_data = {
+        "visible_labels": result.visible_labels or heuristics["chemical_symbols"],
+        "chemical_terms": result.chemical_terms or heuristics["chemical_terms"],
+        "molecular_formulas": result.molecular_formulas or heuristics["molecular_formulas"],
+        "numeric_labels": result.numeric_labels or heuristics["numeric_labels"],
+        "document_sections": result.document_sections or heuristics["document_sections"],
+        "tables": result.tables or heuristics["tables"],
+        "detected_type": result.detected_type if result.detected_type != "unknown" else heuristics["detected_type"],
+    }
+    return AttachmentAnalysisResult(
+        filename=filename,
+        mime_type=mime_type,
+        file_sha256=calculate_sha256(content),
+        extraction_method=method,
+        extracted_text=result.raw_text[: settings.ATTACHMENT_CONTEXT_MAX_CHARS],
+        structured_data=structured_data,
+        detected_entities=[{"type": "compound_term", "value": value} for value in structured_data["chemical_terms"]]
+        + [{"type": "molecular_formula", "value": value} for value in structured_data["molecular_formulas"]],
+        verification_status="not_applicable",
+        confidence=result.confidence,
+        warnings=result.warnings,
+        processing_ms=result.processing_ms,
+    )
+
+
+async def process_attachment(
+    *,
     filename: str,
-    content_type: str | None = None,
-) -> str:
-    """
-    Entry point utama: ekstrak teks dari file berdasarkan tipe.
-    """
-    ext = validate_file_type(filename, content_type)
+    mime_type: str,
+    content: bytes,
+    user_query: str | None,
+) -> AttachmentAnalysisResult:
+    start_time = time.time()
+    ext = validate_file_type(filename, mime_type, content)
 
-    logger.info(f"Processing file: '{filename}' (ext=.{ext}, mime={content_type})")
-
-    if ext in PDF_EXTENSIONS:
-        raw_text = _extract_from_pdf(file_bytes)
-    elif ext in IMAGE_EXTENSIONS:
-        raw_text = _extract_from_image(file_bytes)
-    elif ext in TEXT_EXTENSIONS:
-        raw_text = _extract_from_text(file_bytes)
-    else:
-        raise ValueError(f"Format file '.{ext}' tidak didukung oleh sistem.")
-
-    # Bersihkan whitespace berlebih
-    cleaned = " ".join(raw_text.split())
-
-    # Truncate jika terlalu panjang untuk konteks LLM
-    if len(cleaned) > MAX_EXTRACTED_CHARS:
-        logger.warning(
-            f"Extracted text truncated from {len(cleaned)} to {MAX_EXTRACTED_CHARS} chars."
+    if ext in TEXT_EXTENSIONS:
+        text = _extract_from_text(content)
+        heuristics = classify_extracted_text(text)
+        return AttachmentAnalysisResult(
+            filename=filename,
+            mime_type=mime_type,
+            file_sha256=calculate_sha256(content),
+            extraction_method="text-layer",
+            extracted_text=text[: settings.ATTACHMENT_CONTEXT_MAX_CHARS],
+            structured_data={**heuristics, "detected_type": "plain_text"},
+            verification_status="not_applicable",
+            confidence=1.0 if text.strip() else 0.0,
+            processing_ms=int((time.time() - start_time) * 1000),
         )
-        cleaned = cleaned[:MAX_EXTRACTED_CHARS]
 
-    return cleaned
+    patched_extract = getattr(ocr_service, "extract", None)
+    if ext in IMAGE_EXTENSIONS and callable(patched_extract) and getattr(patched_extract, "__self__", None) is None:
+        image = preprocess_image(content)
+        ocr_result = await patched_extract(image)
+        return _analysis_from_ocr_result(
+            filename=filename,
+            mime_type=mime_type,
+            content=content,
+            result=ocr_result,
+            method="GOT-OCR2",
+        )
+
+    try:
+        from app.core.ocr_client import extract_attachment_with_worker
+
+        return await extract_attachment_with_worker(
+            filename=filename,
+            mime_type=mime_type,
+            content=content,
+            user_query=user_query,
+        )
+    except Exception as exc:
+        logger.warning("OCR worker unavailable or failed: %s", exc)
+        return AttachmentAnalysisResult(
+            filename=filename,
+            mime_type=mime_type,
+            file_sha256=calculate_sha256(content),
+            extraction_method="ocr-worker-unavailable",
+            extracted_text="",
+            structured_data={"detected_type": "unknown"},
+            verification_status="failed",
+            confidence=0.0,
+            warnings=["ocr_worker_unavailable", str(exc)[:200]],
+            processing_ms=int((time.time() - start_time) * 1000),
+        )
+
+
+def extract_text_from_file(file_bytes: bytes, filename: str, content_type: str | None = None) -> str:
+    ext = validate_file_type(filename, content_type, file_bytes)
+    if ext in TEXT_EXTENSIONS:
+        return _extract_from_text(file_bytes)[: settings.ATTACHMENT_CONTEXT_MAX_CHARS]
+    raise RuntimeError("Ekstraksi file non-teks dipindahkan ke OCR worker.")
+
+
+class AttachmentContextPackage(BaseModel):
+    user_question: str = ""
+    file_summary: str
+    ocr_text: str
+    detected_type: str
+    extracted_entities: list[dict] = Field(default_factory=list)
+    verified_candidates: list[dict] = Field(default_factory=list)
+    neo4j_evidence: list[dict] = Field(default_factory=list)
+    confidence: float = 0.0
+    verification_status: str = "unverified"
+    limitations: list[str] = Field(default_factory=list)
+
+
+def build_attachment_context_package(
+    analysis: AttachmentAnalysisResult,
+    *,
+    user_question: str = "",
+) -> AttachmentContextPackage:
+    detected_type = analysis.structured_data.get("detected_type", "unknown")
+    limitations = list(analysis.structured_data.get("limitations") or [])
+    limitations.extend(analysis.warnings or [])
+    if analysis.verification_status not in {"verified", "not_applicable"}:
+        limitations.append("Identitas molekul atau tanaman belum boleh dianggap pasti karena evidence verifikasi belum kuat.")
+    if detected_type == "chemical_structure_diagram":
+        limitations.append("GOT-OCR2 hanya membaca label visual; sistem belum melakukan Optical Chemical Structure Recognition tervalidasi menjadi SMILES/InChI.")
+    deduped_limitations: list[str] = []
+    for item in limitations:
+        if item and item not in deduped_limitations:
+            deduped_limitations.append(item)
+    return AttachmentContextPackage(
+        user_question=user_question,
+        file_summary=f"{analysis.filename} diproses via {analysis.extraction_method}.",
+        ocr_text=analysis.extracted_text,
+        detected_type=detected_type,
+        extracted_entities=analysis.detected_entities,
+        verified_candidates=analysis.neo4j_candidates,
+        neo4j_evidence=analysis.neo4j_candidates,
+        confidence=analysis.confidence,
+        verification_status=analysis.verification_status,
+        limitations=deduped_limitations,
+    )
+
+
+def format_attachment_context_package(package: AttachmentContextPackage) -> str:
+    entities = "\n".join(
+        f"- {entity.get('type')}: {entity.get('value')}" for entity in package.extracted_entities[:30]
+    ) or "Tidak ada entitas eksplisit yang terdeteksi."
+    candidates = "\n".join(
+        f"- {candidate.get('name', 'unknown')} | score={float(candidate.get('score') or 0):.2f} | evidence={', '.join(candidate.get('matched_evidence') or [])}"
+        for candidate in package.verified_candidates[:8]
+    ) or "Tidak ada kandidat Neo4j yang cukup kuat."
+    limitations = "\n".join(f"- {item}" for item in package.limitations[:12]) or "Tidak ada."
+    return f"""[ATTACHMENT EVIDENCE]
+Filename:
+{package.file_summary}
+
+Detected content type:
+{package.detected_type}
+
+OCR result:
+{package.ocr_text[:settings.ATTACHMENT_CONTEXT_MAX_CHARS]}
+
+Entities extracted:
+{entities}
+
+Neo4j candidates:
+{candidates}
+
+Verification status:
+{package.verification_status}
+
+Confidence:
+{package.confidence:.2f}
+
+Limitations:
+{limitations}
+[/ATTACHMENT EVIDENCE]"""

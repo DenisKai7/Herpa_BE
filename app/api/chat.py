@@ -1,4 +1,4 @@
-"""
+﻿"""
 Chat API - Endpoints untuk chat messaging dan manajemen sesi chat.
 """
 
@@ -19,9 +19,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # HELPER: Error Classification
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def classify_provider_error(exc: Exception) -> str:
     message = str(exc).lower()
@@ -47,9 +47,9 @@ def classify_provider_error(exc: Exception) -> str:
     return "provider_error"
 
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # HELPER: Ownership Verification
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def _verify_chat_ownership(chat_id: str, user_id: str) -> dict[str, Any]:
     """Memverifikasi bahwa chat_id milik user_id."""
@@ -132,10 +132,30 @@ def _save_messages_to_db(
 
     return chat_id
 
+def _resolve_attachment_file_context(req: ChatRequest, user_id: str) -> tuple[Optional[str], dict[str, Any]]:
+    """Resolve legacy file_context or session-scoped uploaded attachment context."""
+    if req.file_context:
+        return req.file_context, {}
+    if not req.attachment_id:
+        return None, {}
+    from app.api.upload import get_attachment_context_for_user
 
-# ═══════════════════════════════════════════
+    payload = get_attachment_context_for_user(user_id, req.attachment_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Attachment tidak ditemukan atau bukan milik user ini.")
+    analysis = payload.get("analysis") or {}
+    return payload.get("formatted_context"), {
+        "attachment_id": req.attachment_id,
+        "attachment_filename": payload.get("filename"),
+        "attachment_preview_url": payload.get("preview_url"),
+        "attachment_verification_status": analysis.get("verification_status"),
+        "attachment_confidence": analysis.get("confidence"),
+    }
+
+
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # CHAT MESSAGE ENDPOINTS
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @router.post(
     "/message",
@@ -149,6 +169,8 @@ async def chat_endpoint(
     """Endpoint utama untuk mengirim pesan ke AI agent (mode blocking)."""
     user_id = user_data["user_id"]
     user_role = user_data["role"]
+
+    resolved_file_context, attachment_metadata = _resolve_attachment_file_context(req, user_id)
 
     # 1. Resolve persona & model tier (support backward compatibility)
     persona_str = req.persona or req.ai_mode or "umum"
@@ -173,7 +195,7 @@ async def chat_endpoint(
         pipeline_result = await process_user_query(
             query=req.message,
             ai_mode=persona_str,
-            file_context=req.file_context,
+            file_context=resolved_file_context,
             model=req.model_choice,
             model_tier=model_tier_str,
         )
@@ -195,7 +217,7 @@ async def chat_endpoint(
                 pipeline_result = await process_user_query(
                     query=req.message,
                     ai_mode=persona_str,
-                    file_context=req.file_context,
+                    file_context=resolved_file_context,
                     model=fallback_model,
                     model_tier=fallback_tier,
                 )
@@ -259,7 +281,8 @@ async def chat_endpoint(
         "provider": "hf_router",
         "fallback_used": fallback_used,
         "retrieval_used": True,
-        "evidence_level": "mixed"
+        "evidence_level": "mixed",
+        **attachment_metadata
     }
 
     # Simpan ke database
@@ -294,6 +317,8 @@ async def chat_stream_endpoint(
     user_id = user_data["user_id"]
     user_role = user_data["role"]
 
+    resolved_file_context, attachment_metadata = _resolve_attachment_file_context(req, user_id)
+
     # Resolve Model & Tier
     persona_str = req.persona or req.ai_mode or "umum"
     model_tier_str = req.model_tier
@@ -320,7 +345,7 @@ async def chat_stream_endpoint(
             async for event in process_user_query_stream(
                 query=req.message,
                 ai_mode=persona_str,
-                file_context=req.file_context,
+                file_context=resolved_file_context,
                 model=req.model_choice,
                 model_tier=model_tier_str,
             ):
@@ -377,7 +402,8 @@ async def chat_stream_endpoint(
                             "provider": "hf_router",
                             "fallback_used": fallback_used,
                             "retrieval_used": True,
-                            "evidence_level": "mixed"
+                            "evidence_level": "mixed",
+                            **attachment_metadata
                         }
                         chat_id = _save_messages_to_db(
                             chat_id=chat_id,
@@ -422,9 +448,9 @@ async def chat_stream_endpoint(
     )
 
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # CHAT LIST & HISTORY ENDPOINTS
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @router.get("/list", summary="Daftar chat user")
 async def list_user_chats(
@@ -468,9 +494,9 @@ async def get_chat_messages(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # CHAT MANAGEMENT ENDPOINTS
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @router.patch("/{chat_id}/rename", summary="Ganti judul chat")
 async def rename_chat(
@@ -609,3 +635,5 @@ async def delete_chat(
     except Exception as e:
         logger.error(f"Delete chat error for {chat_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+

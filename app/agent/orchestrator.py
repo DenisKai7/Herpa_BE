@@ -1,4 +1,4 @@
-"""
+﻿"""
 Orchestrator - Central Agentic Pipeline.
 """
 
@@ -7,7 +7,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, AsyncGenerator, Generator, Optional
 
-from app.agent.router import classify_intent
+from app.agent.router import classify_attachment_intent, classify_intent
 from app.agent.retriever import (
     content_based_recommendation,
     search_encyclopedia,
@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent-worker")
 
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # INTERNAL HELPERS
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def _preprocess_file_context(file_context: Optional[str]) -> Optional[str]:
     """Defensive preprocessing untuk file context dari upload."""
@@ -58,17 +58,24 @@ def _retrieve_context(intent: str, query: str, limit: int = 5, graph_limit: int 
         "edukasi": retrieve_education_corpus,
     }
 
-    retriever = retriever_map.get(intent)
+    # Map attachment-specific intents to standard intents for database retrieval
+    mapped_intent = intent
+    if intent in ("identify_compound_from_attachment", "identify_compound", "analyze_attachment", "question_answering_document"):
+        mapped_intent = "ensiklopedia"
+    elif intent in ("summarize_document", "analyze_table", "analyze_formula", "extract_document"):
+        mapped_intent = "edukasi"
+
+    retriever = retriever_map.get(mapped_intent)
     if retriever:
         return retriever(query, limit=limit, graph_limit=graph_limit, persona=persona)
 
-    logger.warning(f"No retriever found for intent '{intent}', returning domain notice.")
+    logger.warning(f"No retriever found for intent '{intent}' (mapped to '{mapped_intent}'), returning domain notice.")
     return "Sistem hanya melayani domain farmasi, herbal, tanaman obat, dan kimia terkait."
 
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # BLOCKING PIPELINE (Non-Streaming)
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def _process_query_sync(
     query: str,
@@ -78,7 +85,7 @@ def _process_query_sync(
     model_tier: Optional[str] = None,
 ) -> dict[str, Any]:
     """Pipeline sinkron untuk memproses query user."""
-    intent = classify_intent(query)
+    intent = classify_attachment_intent(query, file_context or "") if file_context else classify_intent(query)
     logger.info(
         f"Intent classified: '{intent}' | "
         f"Query: '{query[:80]}...' | Mode: {ai_mode} | Tier: {model_tier}"
@@ -97,7 +104,7 @@ def _process_query_sync(
     limit = registry_conf["retrieval_limit"]
     graph_limit = registry_conf["graph_limit"]
 
-    # ── CAPTURE UPLOADED FILE PAYLOAD DATA ──
+    # â”€â”€ CAPTURE UPLOADED FILE PAYLOAD DATA â”€â”€
     file_data_content = _preprocess_file_context(file_context)
     if file_data_content:
         logger.info(
@@ -105,7 +112,7 @@ def _process_query_sync(
             f"(will be injected into LLM system prompt)"
         )
 
-    # ── QUIZ INTENT: Agentic Tool-Calling ──
+    # â”€â”€ QUIZ INTENT: Agentic Tool-Calling â”€â”€
     if intent == "generate_quiz":
         try:
             import asyncio
@@ -143,7 +150,7 @@ def _process_query_sync(
                 "model_route": route,
             }
 
-    # ── RAG INTENT: Retrieval + LLM Formatting ──
+    # â”€â”€ RAG INTENT: Retrieval + LLM Formatting â”€â”€
     search_query = query
     if file_data_content:
         search_query = f"{query} {file_data_content.strip()}"
@@ -192,9 +199,9 @@ async def process_user_query(
     return result
 
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # STREAMING PIPELINE (SSE)
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def _stream_query_sync(
     query: str,
@@ -204,7 +211,7 @@ def _stream_query_sync(
     model_tier: Optional[str] = None,
 ) -> Generator[dict[str, Any], None, None]:
     """Pipeline sinkron streaming untuk SSE (dijalankan di thread pool)."""
-    intent = classify_intent(query)
+    intent = classify_attachment_intent(query, file_context or "") if file_context else classify_intent(query)
     logger.info(f"[Stream] Intent: '{intent}' | Query: '{query[:80]}...' | Mode: {ai_mode} | Tier: {model_tier}")
 
     # 1. Resolve model route & configs
@@ -224,7 +231,7 @@ def _stream_query_sync(
     yield {"event": "intent", "data": intent}
     yield {"event": "model_route", "data": route.dict()}
 
-    # ── CAPTURE UPLOADED FILE PAYLOAD DATA ──
+    # â”€â”€ CAPTURE UPLOADED FILE PAYLOAD DATA â”€â”€
     file_data_content = _preprocess_file_context(file_context)
     if file_data_content:
         logger.info(
@@ -232,7 +239,7 @@ def _stream_query_sync(
             f"(will be injected into streaming LLM prompt)"
         )
 
-    # ── QUIZ: Return full payload (tidak di-stream) ──
+    # â”€â”€ QUIZ: Return full payload (tidak di-stream) â”€â”€
     if intent == "generate_quiz":
         try:
             import asyncio
@@ -266,7 +273,7 @@ def _stream_query_sync(
         yield {"event": "done", "data": ""}
         return
 
-    # ── RAG + Streaming LLM ──
+    # â”€â”€ RAG + Streaming LLM â”€â”€
     search_query = query
     if file_data_content:
         search_query = f"{query} {file_data_content.strip()}"
@@ -339,3 +346,5 @@ async def process_user_query_stream(
             break
 
         yield event
+
+

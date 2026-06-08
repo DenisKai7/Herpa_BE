@@ -1,4 +1,4 @@
-"""
+﻿"""
 Pydantic Schemas - Validasi request/response untuk seluruh API endpoint.
 
 Memastikan type safety dan dokumentasi otomatis di Swagger/OpenAPI.
@@ -11,9 +11,9 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field, EmailStr
 
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # AUTH SCHEMAS
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class RegisterRequest(BaseModel):
     """Schema registrasi user baru dengan data profil lengkap."""
@@ -59,9 +59,9 @@ class AuthResponse(BaseModel):
     user: dict[str, Any]
 
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # CHAT SCHEMAS
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class ChatRequest(BaseModel):
     """Request utama untuk mengirim pesan ke AI Agent."""
@@ -107,6 +107,10 @@ class ChatRequest(BaseModel):
     file_type: Optional[str] = Field(
         None,
         description="MIME type file",
+    )
+    attachment_id: Optional[str] = Field(
+        None,
+        description="Attachment ID hasil upload",
     )
 
 
@@ -159,9 +163,9 @@ class ChatResponse(BaseModel):
     metadata: Optional[dict[str, Any]] = None
 
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # ADMIN SCHEMAS
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class RoleUpdateRequest(BaseModel):
     """Request mengubah role user oleh admin."""
@@ -199,9 +203,9 @@ class UserListItem(BaseModel):
     created_at: Optional[datetime] = None
 
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # EDUCATION & RECOMMENDATION SCHEMAS
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class SearchRequest(BaseModel):
     """Request pencarian ensiklopedia/edukasi."""
@@ -249,9 +253,9 @@ class RecommendationRequest(BaseModel):
     )
 
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # FILE UPLOAD SCHEMAS
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class UploadResponse(BaseModel):
     """Response dari upload file (PDF/Image/TXT)."""
@@ -259,11 +263,14 @@ class UploadResponse(BaseModel):
     filename: str
     url: str
     extracted_text: str
+    success: bool = True
+    attachment: Optional[dict[str, Any]] = None
+    context: Optional[dict[str, Any]] = None
 
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # GENERIC RESPONSE
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class MessageResponse(BaseModel):
     """Generic success/info message response."""
@@ -272,9 +279,9 @@ class MessageResponse(BaseModel):
     data: Optional[dict[str, Any]] = None
 
 
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # CHEMISTRY QUIZ SCHEMAS
-# ═══════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class QuizOptionSchema(BaseModel):
     """Satu opsi jawaban dalam pilihan ganda."""
@@ -340,3 +347,4 @@ class QuizSubmitResponse(BaseModel):
     duration: int
     results: list[AnswerVerificationResult]
     analysis: QuizPerformanceRecommendation
+

@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1.7
+
+FROM python:3.11-slim-bookworm AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=600 \
+    HF_HOME=/models/huggingface \
+    TRANSFORMERS_CACHE=/models/huggingface
+
+WORKDIR /worker
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        tesseract-ocr \
+        tesseract-ocr-ind \
+        tesseract-ocr-eng \
+        libglib2.0-0 \
+        libgl1 \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-ocr.lock /tmp/requirements-ocr.lock
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --upgrade pip \
+    && python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --no-deps -r /tmp/requirements-ocr.lock
+
+RUN python -c "import torch; print('torch=', torch.__version__); print('cuda_available=', torch.cuda.is_available())"
+
+EXPOSE 8010
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8010/health || exit 1
