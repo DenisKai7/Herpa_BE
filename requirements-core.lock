@@ -36,6 +36,8 @@ dnspython==2.8.0
     # via email-validator
 email-validator==2.3.0
     # via pydantic
+et-xmlfile==2.0.0
+    # via openpyxl
 fastapi==0.115.0
     # via
     #   -r requirements-core.txt
@@ -86,6 +88,8 @@ joblib==1.4.2
     # via
     #   -r requirements-core.txt
     #   scikit-learn
+lxml==6.1.1
+    # via python-docx
 markdown-it-py==4.2.0
     # via rich
 mdurl==0.1.2
@@ -99,10 +103,14 @@ numpy==2.4.6
     #   -r requirements-core.txt
     #   scikit-learn
     #   scipy
+openpyxl==3.1.5
+    # via -r requirements-core.txt
 packaging==26.2
     # via
     #   deprecation
     #   huggingface-hub
+pillow==11.0.0
+    # via -r requirements-core.txt
 postgrest==0.17.2
     # via supabase
 pycparser==3.0
@@ -124,8 +132,14 @@ pygments==2.20.0
     # via rich
 pyjwt==2.13.0
     # via gotrue
+pymupdf==1.24.10
+    # via -r requirements-core.txt
+pymupdfb==1.24.10
+    # via pymupdf
 python-dateutil==2.9.0.post0
     # via storage3
+python-docx==1.1.2
+    # via -r requirements-core.txt
 python-dotenv==1.0.1
     # via
     #   -r requirements-core.txt
@@ -179,6 +193,7 @@ typing-extensions==4.15.0
     #   minio
     #   pydantic
     #   pydantic-core
+    #   python-docx
     #   realtime
     #   storage3
 urllib3==2.7.0

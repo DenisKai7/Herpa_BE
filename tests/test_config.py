@@ -2,10 +2,7 @@ from app.core.config import Settings
 
 
 def test_settings_accepts_app_name(monkeypatch):
-    monkeypatch.setenv(
-        "APP_NAME",
-        "Enterprise GraphRAG Agentic AI",
-    )
+    monkeypatch.setenv("APP_NAME", "Enterprise GraphRAG Agentic AI")
 
     settings = Settings()
 
@@ -13,10 +10,7 @@ def test_settings_accepts_app_name(monkeypatch):
 
 
 def test_extra_environment_does_not_crash(monkeypatch):
-    monkeypatch.setenv(
-        "UNUSED_LEGACY_SETTING",
-        "legacy-value",
-    )
+    monkeypatch.setenv("UNUSED_LEGACY_SETTING", "legacy-value")
 
     settings = Settings()
 
@@ -24,10 +18,7 @@ def test_extra_environment_does_not_crash(monkeypatch):
 
 
 def test_minio_endpoint_is_sanitized(monkeypatch):
-    monkeypatch.setenv(
-        "MINIO_ENDPOINT",
-        "http://medical-minio:9000/path",
-    )
+    monkeypatch.setenv("MINIO_ENDPOINT", "http://medical-minio:9000/path")
 
     settings = Settings()
 
@@ -40,9 +31,11 @@ def test_config_module_import():
     assert settings.APP_NAME
 
 
-def test_ocr_worker_defaults():
+def test_vlm_defaults():
     settings = Settings()
 
-    assert settings.OCR_WORKER_URL == "http://medical_ocr_worker:8010"
-    assert settings.OCR_WORKER_TIMEOUT_SECONDS == 180
-    assert settings.OCR_WORKER_ENABLED is True
+    assert settings.VLM_BACKEND == "hf_router"
+    assert settings.VLM_MODEL_ID == "Qwen/Qwen2.5-VL-7B-Instruct"
+    assert settings.VLM_ROUTER_BASE_URL == "https://router.huggingface.co/v1"
+    assert settings.VLM_ALLOW_MODEL_SUBSTITUTION is False
+    assert settings.ATTACHMENT_PROCESSING_ASYNC is True

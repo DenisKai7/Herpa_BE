@@ -10,8 +10,6 @@ services:
       - "8000:8000"
     env_file:
       - .env
-    environment:
-      OCR_WORKER_URL: http://medical_ocr_worker:8010
     depends_on:
       medical_redis:
         condition: service_started
@@ -19,28 +17,6 @@ services:
         condition: service_started
       medical-minio:
         condition: service_started
-    networks:
-      - medical_network
-
-  medical_ocr_worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.ocr
-    image: medical-ocr-worker:cpu-v1
-    container_name: medical_ocr_worker
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      OCR_DEVICE: cpu
-      OCR_DTYPE: float32
-      OCR_LAZY_LOAD: "true"
-      HF_HOME: /models/huggingface
-      TRANSFORMERS_CACHE: /models/huggingface
-    volumes:
-      - hf_cache:/models/huggingface
-    expose:
-      - "8010"
     networks:
       - medical_network
 
@@ -106,7 +82,6 @@ volumes:
   neo4j_logs:
   redis_data:
   minio_data:
-  hf_cache:
 
 networks:
   medical_network:

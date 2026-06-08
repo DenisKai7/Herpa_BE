@@ -143,8 +143,45 @@ def _resolve_attachment_file_context(req: ChatRequest, user_id: str) -> tuple[Op
     payload = get_attachment_context_for_user(user_id, req.attachment_id)
     if not payload:
         raise HTTPException(status_code=404, detail="Attachment tidak ditemukan atau bukan milik user ini.")
+
+    processing_status = payload.get("processing_status", "completed" if payload.get("formatted_context") else "queued")
+    if processing_status != "completed":
+        code = "ATTACHMENT_PROCESSING_FAILED" if processing_status == "failed" else "ATTACHMENT_NOT_READY"
+        message = (
+            "Lampiran gagal dianalisis. Silakan coba lagi atau hapus lampiran."
+            if processing_status == "failed"
+            else "Lampiran masih diproses. Silakan tunggu hingga selesai."
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "success": False,
+                "error": {
+                    "code": code,
+                    "message": message,
+                    "retryable": True,
+                    "processing_status": processing_status,
+                },
+            },
+        )
+
+    formatted_context = payload.get("formatted_context")
+    if not formatted_context:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "success": False,
+                "error": {
+                    "code": "ATTACHMENT_NOT_READY",
+                    "message": "Lampiran masih diproses. Silakan tunggu hingga selesai.",
+                    "retryable": True,
+                    "processing_status": processing_status,
+                },
+            },
+        )
+
     analysis = payload.get("analysis") or {}
-    return payload.get("formatted_context"), {
+    return formatted_context, {
         "attachment_id": req.attachment_id,
         "attachment_filename": payload.get("filename"),
         "attachment_preview_url": payload.get("preview_url"),

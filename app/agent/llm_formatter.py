@@ -289,9 +289,9 @@ Peraturan Mutlak: Anda WAJIB menggunakan identitas ilmiah di atas jika membahas 
             "- Jawab berdasarkan ATTACHMENT EVIDENCE dan Neo4j evidence di atas.\n"
             "- Prioritas konteks: attachment user saat ini, chunk attachment chat saat ini, Neo4j verification, Supabase RAG, corpus internal, lalu pengetahuan model.\n"
             "- Jika verification_status bukan verified, jangan menyatakan identitas senyawa/tanaman sebagai pasti. Gunakan istilah seperti 'kandidat', 'paling konsisten', atau 'belum cukup bukti'.\n"
-            "- Jika gambar berupa skeletal chemical structure, GOT-OCR2 hanya membaca label/angka/teks visual. Jangan mengarang SMILES, InChI, tanaman asal, khasiat klinis, atau diagnosis dari bentuk struktur saja.\n"
+            "- Jika gambar berupa skeletal chemical structure, VLM hanya membaca bukti visual. Jangan mengarang SMILES, InChI, tanaman asal, khasiat klinis, atau diagnosis dari bentuk struktur saja.\n"
             "- Jika bukti attachment dan database bertentangan, jelaskan konflik, turunkan confidence, dan sebutkan data tambahan yang dibutuhkan.\n"
-            "- Jika OCR/Neo4j gagal, tetap jawab bagian yang terbaca sebagai hasil sementara dengan keterbatasan eksplisit.\n"
+            "- Jika VLM/Neo4j gagal, tetap jawab bagian yang terbaca sebagai hasil sementara dengan keterbatasan eksplisit.\n"
             "- Semua output wajib Bahasa Indonesia dan sesuai persona.\n"
         )
     system_message += f"""

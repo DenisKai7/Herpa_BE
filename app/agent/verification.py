@@ -1,5 +1,5 @@
 ﻿"""
-Neo4j Verification Module - Verifikasi hasil OCR gambar & dokumen menggunakan Graph Database.
+Neo4j Verification Module - Verifikasi hasil VLM gambar & dokumen menggunakan Graph Database.
 """
 
 import asyncio
@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.core.database import neo4j_driver
-from app.agent.multimodal import OcrExtractionResult
+from app.agent.multimodal import VisualExtractionResult
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ class Neo4jCandidate(BaseModel):
 
 class Neo4jVerificationResult(BaseModel):
     success: bool
-    verification_status: str  # verified | partially_verified | ambiguous | insufficient_evidence | failed
+    verification_status: str  # verified | partially_verified | ambiguous | no_match | unavailable
     candidates: list[Neo4jCandidate] = Field(default_factory=list)
     confidence: float = 0.0
     warnings: list[str] = Field(default_factory=list)
@@ -113,11 +113,11 @@ class Neo4jVerificationResult(BaseModel):
 
 
 async def verify_attachment_with_neo4j(
-    extraction: OcrExtractionResult,
+    extraction: VisualExtractionResult,
     user_query: str,
 ) -> Neo4jVerificationResult:
     """
-    Verifikasi hasil ekstraksi OCR menggunakan Neo4j database.
+    Verifikasi hasil ekstraksi VLM menggunakan Neo4j database.
     Mencocokkan entitas senyawa, formula, dan mengalkulasi score kebenaran.
     """
     if not settings.NEO4J_ATTACHMENT_VERIFICATION:
@@ -130,8 +130,8 @@ async def verify_attachment_with_neo4j(
     if not extraction.success or not extraction.raw_text.strip():
         return Neo4jVerificationResult(
             success=False,
-            verification_status="insufficient_evidence",
-            warnings=["empty_ocr_extraction"],
+            verification_status="no_match",
+            warnings=["empty_visual_extraction"],
         )
 
     try:
@@ -145,7 +145,7 @@ async def verify_attachment_with_neo4j(
                 warnings=["neo4j_schema_missing_compound_mapping"],
                 limitations=["Schema Neo4j tidak memiliki mapping label/properti senyawa yang dapat diverifikasi."],
             )
-        # Gather search terms: chemical terms & molecular formulas from OCR
+        # Gather search terms: visual candidates and molecular formulas from VLM
         search_terms = [t.lower().strip() for t in extraction.chemical_terms]
         search_formulas = [f.lower().strip() for f in extraction.molecular_formulas]
 
@@ -236,19 +236,19 @@ async def verify_attachment_with_neo4j(
             if c_formula and any(f == c_formula.lower() for f in search_formulas):
                 score += 0.30
                 matched_evidence.append("Exact molecular formula match")
-            # Contradicting formula (if OCR formula found, but it differs from DB candidate formula)
+            # Contradicting formula when VLM formula differs from DB candidate formula
             elif c_formula and search_formulas:
                 score -= 0.50
                 matched_evidence.append("Contradicting formula")
 
             # 5. Related Herb Match
-            # Check if related herb common or scientific name mentioned in query or raw OCR
+            # Check if related herb common or scientific name mentioned in query or visual text
             flat_herb_names = [h.lower() for h in related_herbs + scientific_names]
             if any(any(h in text for h in flat_herb_names) for text in [extraction.raw_text.lower(), user_query.lower()]):
                 score += 0.15
                 matched_evidence.append("Related herb match")
 
-            # 6. Visible label consistency (e.g. OH, CH3 in OCR struct list matches candidate properties or aliases)
+            # 6. Visible label consistency (e.g. OH, CH3 in visual labels matches candidate properties or aliases)
             if extraction.visible_labels:
                 # heuristic: structural groups presence
                 groups_matched = False
@@ -278,7 +278,7 @@ async def verify_attachment_with_neo4j(
         candidates.sort(key=lambda x: x.score, reverse=True)
 
         # Resolve overall status
-        status = "insufficient_evidence"
+        status = "no_match"
         overall_confidence = 0.0
         limitations = []
 
@@ -293,7 +293,7 @@ async def verify_attachment_with_neo4j(
             elif overall_confidence > 0.30:
                 status = "ambiguous"
             else:
-                status = "insufficient_evidence"
+                status = "no_match"
         else:
             limitations.append("Tidak ditemukan kandidat senyawa yang cocok di database grafik.")
 

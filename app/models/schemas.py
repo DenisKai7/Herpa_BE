@@ -94,7 +94,7 @@ class ChatRequest(BaseModel):
     )
     file_context: Optional[str] = Field(
         None,
-        description="Teks hasil OCR dari file upload",
+        description="Teks atau evidence visual hasil analisis attachment",
     )
     file_url: Optional[str] = Field(
         None,
@@ -347,4 +347,14 @@ class QuizSubmitResponse(BaseModel):
     duration: int
     results: list[AnswerVerificationResult]
     analysis: QuizPerformanceRecommendation
+
+
+class AttachmentRetryResponse(BaseModel):
+    """Response dari retry analisis attachment."""
+    attachment_id: str
+    processing_status: str
+    progress: int
+    verification_status: str
+    confidence: float
+    retryable: bool
 

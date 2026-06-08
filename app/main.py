@@ -19,6 +19,8 @@ from app.api import admin, auth, chat, education, recommendation, upload, quiz
 from app.core.config import settings
 from app.core.database import close_connections, verify_neo4j_connection
 from app.core.minio_client import ensure_bucket_exists
+from app.core.huggingface_vlm_client import HuggingFaceVlmClient
+from app.agent.multimodal import set_vlm_client
 
 # ═══════════════════════════════════════════
 # LOGGING CONFIGURATION
@@ -91,6 +93,9 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Failed to trigger quiz generator startup logs: {e}")
 
     redis_connection = None
+    vlm_client = HuggingFaceVlmClient(settings)
+    app.state.hf_vlm_client = vlm_client
+    set_vlm_client(vlm_client)
 
     # ── Redis Rate Limiter ──
     try:
@@ -130,6 +135,12 @@ async def lifespan(app: FastAPI):
             logger.info("Redis connection closed.")
         except Exception as e:
             logger.error(f"Error closing Redis connection: {e}")
+    try:
+        await vlm_client.aclose()
+        set_vlm_client(None)
+        logger.info("Hugging Face VLM client closed.")
+    except Exception as e:
+        logger.error(f"Error closing Hugging Face VLM client: {e}")
     close_connections()
     logger.info("All services closed. Goodbye.")
 
@@ -192,7 +203,7 @@ app.include_router(
 app.include_router(
     upload.router,
     prefix="/api/files",
-    tags=["Multimodal OCR"],
+    tags=["Multimodal Attachment"],
 )
 app.include_router(
     quiz.router,
@@ -283,10 +294,16 @@ async def detailed_health_check() -> dict[str, Any]:
         health["status"] = "degraded"
 
     return health
+@app.get("/api/health/vlm", tags=["System"])
+async def health_vlm_endpoint(request: Request) -> dict[str, Any]:
+    """Healthcheck VLM remote tanpa mengunduh atau menjalankan model lokal."""
+    client: HuggingFaceVlmClient = request.app.state.hf_vlm_client
+    return await client.healthcheck()
+
+
 @app.get("/api/health/multimodal", tags=["System"])
-async def health_multimodal_endpoint() -> dict[str, Any]:
-    """Healthcheck multimodal tanpa menjalankan OCR generation."""
-    from app.agent.multimodal import ocr_service
+async def health_multimodal_endpoint(request: Request) -> dict[str, Any]:
+    """Healthcheck attachment multimodal remote VLM, Neo4j, dan MinIO."""
     from app.agent.verification import get_neo4j_schema_map
     from app.core.minio_client import minio_client as mc
 
@@ -307,19 +324,10 @@ async def health_multimodal_endpoint() -> dict[str, Any]:
     except Exception:
         minio_available = False
 
+    client: HuggingFaceVlmClient = request.app.state.hf_vlm_client
+    vlm = await client.healthcheck()
     return {
-        "ocr": {
-            "worker_url": settings.OCR_WORKER_URL,
-            "model_id": settings.OCR_MODEL_ID,
-            "loaded": getattr(ocr_service, "_model", None) is not None,
-            "device": getattr(ocr_service, "_device", None) or "worker",
-            "available": settings.OCR_WORKER_ENABLED,
-        },
-        "neo4j": {
-            "available": neo4j_available,
-            "schema_loaded": schema_loaded,
-        },
-        "storage": {
-            "minio_available": minio_available,
-        },
+        "vlm": vlm,
+        "neo4j": {"available": neo4j_available, "schema_loaded": schema_loaded},
+        "storage": {"minio_available": minio_available},
     }
