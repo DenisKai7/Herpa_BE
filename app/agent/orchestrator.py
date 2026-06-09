@@ -12,10 +12,14 @@ from app.agent.retriever import (
     content_based_recommendation,
     search_encyclopedia,
     retrieve_education_corpus,
+    retrieve_grounded_context,
 )
 from app.agent.llm_formatter import generate_strict_response, generate_streaming_response, MODEL_REGISTRY
 from app.agent.quiz_generator import generate_interactive_quiz_tool
-from app.core.dependencies import resolve_model, ModelTier
+from app.agent.plant_identity import resolve_canonical_plant_identity
+from app.agent.validators import build_safe_response, validate_generated_answer, validation_metadata
+from app.core.config import settings
+from app.core.dependencies import PERSONA_ALIASES, Persona, resolve_model, ModelTier
 
 logger = logging.getLogger(__name__)
 
@@ -155,26 +159,97 @@ def _process_query_sync(
     if file_data_content:
         search_query = f"{query} {file_data_content.strip()}"
 
-    context_data = _retrieve_context(intent, search_query, limit=limit, graph_limit=graph_limit, persona=ai_mode)
-
-    if (not context_data or context_data.strip() == "" or "0 records found" in context_data) and file_data_content:
-        logger.info("Graph search was empty but file context exists. Feeding vision data into context_data to bypass strict RAG constraints.")
-        context_data = f"Data Hasil Analisis Gambar/Berkas Laboratorium: {file_data_content}"
-
-    final_response = generate_strict_response(
-        query=query,
-        context=context_data,
-        ai_mode=ai_mode,
+    persona_enum = PERSONA_ALIASES.get(str(ai_mode).lower().strip(), Persona.UMUM)
+    identity = resolve_canonical_plant_identity(query)
+    grounded_context = retrieve_grounded_context(
+        query=search_query,
         intent=intent,
-        file_context=file_data_content,
-        model=route.used_model,
-        model_tier=route.model_tier.value,
+        limit=limit,
+        graph_limit=graph_limit,
+        persona=ai_mode,
+        tier=route.model_tier,
+        identity=identity,
     )
+    context_data = grounded_context.to_prompt_text()
+
+    if (not context_data or "Data spesifik tanaman belum tersedia" in context_data) and file_data_content:
+        context_data = f"{context_data}\n\nData Hasil Analisis Gambar/Berkas Laboratorium: {file_data_content}"
+
+    # Handle critical conflicts proactively
+    critical_conflict = any(c.severity == "critical" for c in grounded_context.conflicts)
+    if critical_conflict and identity.resolution_method not in {"exact_database_match", "exact_alias_match", "scientific_name_match"}:
+        final_response = build_safe_response(identity, persona_enum, route.model_tier, ["critical_identity_conflict"])
+        validation = validate_generated_answer(
+            answer=final_response,
+            identity=identity,
+            grounded_context=grounded_context,
+            persona=persona_enum,
+            tier=route.model_tier,
+        )
+    else:
+        final_response = generate_strict_response(
+            query=query,
+            context=context_data,
+            ai_mode=ai_mode,
+            intent=intent,
+            file_context=file_data_content,
+            model=route.used_model,
+            model_tier=route.model_tier.value,
+            identity=identity,
+            grounded_context=grounded_context,
+        )
+        validation = validate_generated_answer(
+            answer=final_response,
+            identity=identity,
+            grounded_context=grounded_context,
+            persona=persona_enum,
+            tier=route.model_tier,
+        )
+        if not validation.passed:
+            retry_response = generate_strict_response(
+                query=query,
+                context=context_data,
+                ai_mode=ai_mode,
+                intent=intent,
+                file_context=file_data_content,
+                model=route.used_model,
+                model_tier=route.model_tier.value,
+                identity=identity,
+                grounded_context=grounded_context,
+                strict_retry=True,
+            )
+            retry_validation = validate_generated_answer(
+                answer=retry_response,
+                identity=identity,
+                grounded_context=grounded_context,
+                persona=persona_enum,
+                tier=route.model_tier,
+            )
+            if retry_validation.passed:
+                final_response = retry_response
+                validation = retry_validation
+            else:
+                final_response = build_safe_response(identity, persona_enum, route.model_tier, retry_validation.reasons)
+                validation = retry_validation
+
+    metadata = {
+        "persona": persona_enum.value,
+        "model_tier": route.model_tier.value,
+        "canonical_entity": {
+            "local_name": identity.canonical_local_name or identity.extracted_local_name,
+            "scientific_name": identity.scientific_name,
+            "confidence": identity.confidence,
+            "resolution_method": identity.resolution_method,
+        },
+        "retrieval": grounded_context.retrieval_metadata,
+        "validation": validation_metadata(validation),
+    }
 
     return {
         "intent_detected": intent,
         "ai_response": final_response,
         "model_route": route,
+        "metadata": metadata,
     }
 
 
@@ -278,11 +353,20 @@ def _stream_query_sync(
     if file_data_content:
         search_query = f"{query} {file_data_content.strip()}"
 
-    context_data = _retrieve_context(intent, search_query, limit=limit, graph_limit=graph_limit, persona=ai_mode)
+    identity = resolve_canonical_plant_identity(query)
+    grounded_context = retrieve_grounded_context(
+        query=search_query,
+        intent=intent,
+        limit=limit,
+        graph_limit=graph_limit,
+        persona=ai_mode,
+        tier=route.model_tier,
+        identity=identity,
+    )
+    context_data = grounded_context.to_prompt_text()
 
-    if (not context_data or context_data.strip() == "" or "0 records found" in context_data) and file_data_content:
-        logger.info("[Stream] Graph search empty, bypassing strict RAG constraint via vision data injection.")
-        context_data = f"Data Hasil Analisis Gambar/Berkas Laboratorium: {file_data_content}"
+    if (not context_data or "Data spesifik tanaman belum tersedia" in context_data) and file_data_content:
+        context_data = f"{context_data}\n\nData Hasil Analisis Gambar/Berkas Laboratorium: {file_data_content}"
 
     full_response = ""
     try:
@@ -294,6 +378,8 @@ def _stream_query_sync(
             file_context=file_data_content,
             model=route.used_model,
             model_tier=route.model_tier.value,
+            identity=identity,
+            grounded_context=grounded_context,
         ):
             full_response += token
             yield {"event": "token", "data": token}

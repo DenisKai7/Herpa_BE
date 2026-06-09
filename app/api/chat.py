@@ -319,7 +319,8 @@ async def chat_endpoint(
         "fallback_used": fallback_used,
         "retrieval_used": True,
         "evidence_level": "mixed",
-        **attachment_metadata
+        **(pipeline_result.get("metadata") or {}),
+        **attachment_metadata,
     }
 
     # Simpan ke database

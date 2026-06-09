@@ -8,7 +8,8 @@ from typing import Any, Optional
 
 from app.core.database import neo4j_driver, supabase
 from app.core.embedding import embed_text
-from app.core.dependencies import Persona, PERSONA_ALIASES
+from app.core.dependencies import ModelTier, Persona, PERSONA_ALIASES
+from app.agent.plant_identity import CanonicalPlantIdentity, GroundedContext, build_grounded_context, normalize_text
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,80 @@ def _format_records_to_text(
         lines.append(f"\n--- Hasil #{i} ---")
         lines.extend(parts)
     return "\n".join(lines)
+
+
+def _match_function_for_intent(intent: str) -> str:
+    if intent == "konsultasi":
+        return "match_plants"
+    if intent == "edukasi":
+        return "match_education"
+    return "match_encyclopedia"
+
+
+def _exact_graph_records(identity: CanonicalPlantIdentity, limit: int) -> list[dict[str, Any]]:
+    if identity.resolution_method in {"not_found", "ambiguous"}:
+        return []
+    aliases = [normalize_text(v) for v in [identity.canonical_local_name, identity.extracted_local_name, identity.scientific_name, *identity.synonyms] if v]
+    cypher = """
+    MATCH (h:Herb)
+    WHERE ($entity_id IS NOT NULL AND elementId(h) = $entity_id)
+       OR ($scientific_name IS NOT NULL AND toLower(h.latinName) = toLower($scientific_name))
+       OR toLower(h.commonName) IN $aliases
+       OR any(x IN coalesce(h.localNames, []) WHERE toLower(toString(x)) IN $aliases)
+    OPTIONAL MATCH (h)-[:BELONGS_TO]->(f:Family)
+    OPTIONAL MATCH (h)-[:HAS_COMPOUND]->(c:Compound)
+    OPTIONAL MATCH (h)-[:HAS_COMPOUND_CLASS]->(cc:CompoundClass)
+    OPTIONAL MATCH (h)-[:USED_FOR]->(t:TherapeuticUse)
+    OPTIONAL MATCH (h)-[:HAS_TOXICITY]->(tox:ToxicityCategory)
+    OPTIONAL MATCH (h)-[:HAS_PROTEIN_TARGET]->(pt:ProteinTarget)
+    RETURN elementId(h) AS entity_id,
+           h.commonName AS local_name,
+           h.latinName AS scientific_name,
+           f.name AS family,
+           h.simplisiaName AS simplisia,
+           collect(DISTINCT c.name) AS compounds,
+           collect(DISTINCT cc.name) AS compound_classes,
+           collect(DISTINCT t.name) AS traditional_uses,
+           collect(DISTINCT tox.name) AS safety,
+           collect(DISTINCT pt.name) AS protein_targets,
+           'neo4j_exact_entity' AS source_type,
+           'plant_specific' AS source_scope
+    LIMIT $limit
+    """
+    return _graph_search(
+        identity.original_query,
+        cypher,
+        entity_id=identity.entity_id,
+        scientific_name=identity.scientific_name,
+        aliases=aliases,
+        limit=limit,
+    )
+
+
+def retrieve_grounded_context(
+    *,
+    query: str,
+    intent: str,
+    limit: int = 5,
+    graph_limit: int = 4,
+    persona: str = "umum",
+    tier: ModelTier = ModelTier.FAST,
+    identity: CanonicalPlantIdentity,
+) -> GroundedContext:
+    """Retrieve raw vector/graph records and compile entity-locked context."""
+    vector_results = _vector_search(query, "", _match_function_for_intent(intent), limit)
+    graph_results = _exact_graph_records(identity, graph_limit)
+    context = build_grounded_context(
+        query=query,
+        identity=identity,
+        vector_records=vector_results,
+        graph_records=graph_results,
+        persona=_normalize_persona(persona),
+        tier=tier,
+    )
+    if identity.resolution_method not in {"not_found", "ambiguous"} and not graph_results:
+        context.limitations.append("graph_entity_not_found")
+    return context
 
 # ═══════════════════════════════════════════
 # INTENT: KONSULTASI (Content-Based Recommendation)

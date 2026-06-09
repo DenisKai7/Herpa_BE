@@ -1,8 +1,7 @@
 import logging
-import re
 from typing import Optional, List
 from pydantic import BaseModel
-from app.core.database import neo4j_driver
+from app.agent.plant_identity import resolve_canonical_plant_identity
 
 logger = logging.getLogger(__name__)
 
@@ -59,49 +58,17 @@ STATIC_HERB_MAP = {
 }
 
 def resolve_plant_identity(query: str) -> Optional[PlantIdentity]:
-    """
-    Ekstrak nama tanaman dari query dan cari identitas kanonik di Neo4j/Static Map.
-    """
+    """Backward-compatible wrapper around the canonical resolver."""
     if not query:
         return None
-
-    query_lower = query.lower()
-
-    # 1. Check static map first for ultra-reliability
-    for key, data in STATIC_HERB_MAP.items():
-        if key in query_lower:
-            logger.info(f"Resolved plant identity from static map: {key}")
-            return PlantIdentity(**data)
-
-    # 2. Query Neo4j
-    try:
-        # Search by commonName or latinName
-        cypher = """
-        MATCH (h:Herb)
-        WHERE toLower(h.commonName) CONTAINS toLower($q)
-           OR toLower(h.latinName) CONTAINS toLower($q)
-        OPTIONAL MATCH (h)-[:BELONGS_TO]->(f:Family)
-        RETURN h.commonName AS commonName, h.latinName AS latinName,
-               f.name AS family, h.localNames AS localNames
-        LIMIT 1
-        """
-        # Try to find a specific word in the query
-        words = [w.strip() for w in re.findall(r'\b\w{4,}\b', query_lower) if w.strip()]
-        for word in words:
-            if word in ("untuk", "sakit", "obat", "yang", "pada", "bagaimana", "cara", "resep"):
-                continue
-            records, _, _ = neo4j_driver.execute_query(cypher, q=word)
-            if records:
-                rec = records[0]
-                return PlantIdentity(
-                    local_name=rec.get("commonName") or word.capitalize(),
-                    scientific_name=rec.get("latinName"),
-                    family=rec.get("family"),
-                    synonyms=rec.get("localNames") or [],
-                    confidence=0.9,
-                    sources=["Neo4j Graph DB"]
-                )
-    except Exception as e:
-        logger.error(f"Error in resolve_plant_identity: {e}")
-
-    return None
+    identity = resolve_canonical_plant_identity(query)
+    if identity.resolution_method in {"not_found", "ambiguous"}:
+        return None
+    return PlantIdentity(
+        local_name=identity.canonical_local_name or identity.extracted_local_name or "",
+        scientific_name=identity.scientific_name,
+        family=identity.family,
+        synonyms=identity.synonyms,
+        confidence=identity.confidence,
+        sources=identity.evidence_sources or [identity.resolution_method],
+    )

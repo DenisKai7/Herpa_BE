@@ -9,13 +9,12 @@ from huggingface_hub import InferenceClient
 
 from app.core.config import settings
 from app.core.dependencies import Persona, ModelTier, PERSONA_ALIASES, resolve_model
-from app.agent.resolver import resolve_plant_identity
+from app.agent.plant_identity import CanonicalPlantIdentity, GroundedContext, resolve_canonical_plant_identity
+from app.agent.prompts import build_system_prompt
 
 logger = logging.getLogger(__name__)
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-# LLM CLIENT (Singleton) - HuggingFace Inference API
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
 _client = InferenceClient(
     provider="auto",
     api_key=settings.HF_API_TOKEN,
@@ -251,56 +250,35 @@ def _build_system_prompt(
     model_tier: ModelTier,
     intent: str,
     file_context: Optional[str] = None,
+    identity: Optional[CanonicalPlantIdentity] = None,
+    grounded_context: Optional[GroundedContext] = None,
+    strict_retry: bool = False,
 ) -> str:
     """Membangun system prompt terstruktur untuk LLM."""
-    persona_prompt = PERSONA_PROMPTS.get(persona, PERSONA_PROMPTS[Persona.UMUM])
-    structure_instruction = STRUCTURE_INSTRUCTIONS.get(persona, "")
-    tier_prompt = MODEL_TIER_PROMPTS.get(model_tier, MODEL_TIER_PROMPTS[ModelTier.FAST])
-    intent_instruction = INTENT_INSTRUCTIONS.get(
-        intent, "Jawab pertanyaan berdasarkan data yang tersedia."
-    )
-
-    system_message = BASE_SYSTEM_PROMPT
-    system_message += f"\nâ•â•â• {persona_prompt} â•â•â•"
-    system_message += f"\n\nâ•â•â• {tier_prompt} â•â•â•"
-
-    # Plant identity resolution & verification injection
-    identity = resolve_plant_identity(query)
-    if identity:
-        synonyms_str = ", ".join(identity.synonyms) if identity.synonyms else "Tidak tersedia"
-        system_message += f"""
-
-â•â•â• VALIDASI IDENTITAS TANAMAN (CANONICAL FACTS) â•â•â•
-Nama Lokal: {identity.local_name}
-Nama Ilmiah: {identity.scientific_name or 'Tidak tersedia'}
-Famili: {identity.family or 'Tidak tersedia'}
-Sinonim: {synonyms_str}
-
-Peraturan Mutlak: Anda WAJIB menggunakan identitas ilmiah di atas jika membahas tentang tanaman tersebut. Dilarang keras menukar nama ilmiah atau mencampurkannya dengan spesies lain (misal: dilarang keras mencampurkan Curcuma xanthorrhiza dengan Curcuma zedoaria atau Curcuma longa)."""
-
-    system_message += f"\n\nâ•â•â• INSTRUKSI INTENT: {intent.upper()} â•â•â•\n{intent_instruction}"
-    system_message += structure_instruction
-
-    if file_context and file_context.strip():
-        file_context_buffer = file_context[:12000]
-        system_message += f"\n\n{file_context_buffer.strip()}\n"
-        system_message += (
-            "\nATURAN KERAS KONTEKS ATTACHMENT:\n"
-            "- Jawab berdasarkan ATTACHMENT EVIDENCE dan Neo4j evidence di atas.\n"
-            "- Prioritas konteks: attachment user saat ini, chunk attachment chat saat ini, Neo4j verification, Supabase RAG, corpus internal, lalu pengetahuan model.\n"
-            "- Jika verification_status bukan verified, jangan menyatakan identitas senyawa/tanaman sebagai pasti. Gunakan istilah seperti 'kandidat', 'paling konsisten', atau 'belum cukup bukti'.\n"
-            "- Jika gambar berupa skeletal chemical structure, VLM hanya membaca bukti visual. Jangan mengarang SMILES, InChI, tanaman asal, khasiat klinis, atau diagnosis dari bentuk struktur saja.\n"
-            "- Jika bukti attachment dan database bertentangan, jelaskan konflik, turunkan confidence, dan sebutkan data tambahan yang dibutuhkan.\n"
-            "- Jika VLM/Neo4j gagal, tetap jawab bagian yang terbaca sebagai hasil sementara dengan keterbatasan eksplisit.\n"
-            "- Semua output wajib Bahasa Indonesia dan sesuai persona.\n"
+    resolved_identity = identity or resolve_canonical_plant_identity(query)
+    resolved_context = grounded_context
+    if resolved_context is None:
+        from app.agent.plant_identity import build_grounded_context
+        resolved_context = build_grounded_context(
+            query=query,
+            identity=resolved_identity,
+            vector_records=[],
+            graph_records=[],
+            persona=persona,
+            tier=model_tier,
         )
-    system_message += f"""
-
-â•â•â• DATA DATABASE MULAI â•â•â•
-{context}
-â•â•â• DATA DATABASE SELESAI â•â•â•"""
-
-    return system_message
+        if context:
+            resolved_context.general_evidence.append({"source_type": "legacy_context", "content": context})
+    return build_system_prompt(
+        persona=persona,
+        tier=model_tier,
+        identity=resolved_identity,
+        grounded_context=resolved_context,
+        intent=intent,
+        query=query,
+        file_context=file_context,
+        strict_retry=strict_retry,
+    )
 
 def generate_strict_response(
     query: str,
@@ -310,6 +288,9 @@ def generate_strict_response(
     file_context: Optional[str] = None,
     model: Optional[str] = None,
     model_tier: Optional[str] = None,
+    identity: Optional[CanonicalPlantIdentity] = None,
+    grounded_context: Optional[GroundedContext] = None,
+    strict_retry: bool = False,
 ) -> str:
     """Generate respons AI dengan model routing dan format terstruktur."""
     persona = normalize_persona(ai_mode)
@@ -330,7 +311,10 @@ def generate_strict_response(
         persona=persona,
         model_tier=route.model_tier,
         intent=intent,
-        file_context=file_context
+        file_context=file_context,
+        identity=identity,
+        grounded_context=grounded_context,
+        strict_retry=strict_retry,
     )
 
     try:
@@ -366,6 +350,9 @@ def generate_streaming_response(
     file_context: Optional[str] = None,
     model: Optional[str] = None,
     model_tier: Optional[str] = None,
+    identity: Optional[CanonicalPlantIdentity] = None,
+    grounded_context: Optional[GroundedContext] = None,
+    strict_retry: bool = False,
 ) -> Generator[str, None, None]:
     """Generator streaming token dari LLM."""
     persona = normalize_persona(ai_mode)
@@ -386,7 +373,10 @@ def generate_streaming_response(
         persona=persona,
         model_tier=route.model_tier,
         intent=intent,
-        file_context=file_context
+        file_context=file_context,
+        identity=identity,
+        grounded_context=grounded_context,
+        strict_retry=strict_retry,
     )
 
     try:
