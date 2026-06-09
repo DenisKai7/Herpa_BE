@@ -71,9 +71,9 @@ class Settings(BaseSettings):
 
     # Remote VLM
     VLM_BACKEND: str = "hf_router"
-    VLM_MODEL_ID: str = "Qwen/Qwen2.5-VL-7B-Instruct"
     VLM_PROVIDER: str = "auto"
     VLM_ROUTER_BASE_URL: str = "https://router.huggingface.co/v1"
+    VLM_DISABLED_MODELS: str = "Qwen/Qwen2.5-VL-7B-Instruct"
     VLM_ENDPOINT_URL: str = ""
     VLM_REQUEST_TIMEOUT_SECONDS: int = 180
     VLM_CONNECT_TIMEOUT_SECONDS: int = 15
@@ -85,8 +85,23 @@ class Settings(BaseSettings):
     VLM_MAX_IMAGES_PER_REQUEST: int = 4
     VLM_MAX_BASE64_BYTES: int = 12_000_000
     VLM_HEALTHCHECK_ENABLED: bool = True
-    VLM_ALLOW_MODEL_SUBSTITUTION: bool = False
+    VLM_ALLOW_MODEL_SUBSTITUTION: bool = True
     VLM_HEALTHCHECK_CACHE_SECONDS: int = 600
+    VLM_PRIMARY_MODEL: str = "zai-org/GLM-4.5V:cheapest"
+    VLM_FALLBACK_MODELS: str = "CohereLabs/command-a-vision-07-2025:cohere"
+    VLM_MAX_RETRIES_PER_MODEL: int = 1
+    VLM_AVAILABILITY_CACHE_SECONDS: int = 600
+    VLM_FAILURE_COOLDOWN_SECONDS: int = 600
+
+    @property
+    def vlm_model_candidates(self) -> list[str]:
+        candidates = [self.VLM_PRIMARY_MODEL]
+        candidates.extend(
+            model.strip()
+            for model in self.VLM_FALLBACK_MODELS.split(",")
+            if model.strip()
+        )
+        return list(dict.fromkeys(candidates))
 
     # Attachment
     ATTACHMENT_MAX_SIZE_MB: int = 20

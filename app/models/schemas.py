@@ -357,4 +357,9 @@ class AttachmentRetryResponse(BaseModel):
     verification_status: str
     confidence: float
     retryable: bool
+    requested_model: Optional[str] = None
+    used_model: Optional[str] = None
+    fallback_used: Optional[bool] = None
+    fallback_reason: Optional[str] = None
+    error: Optional[dict[str, Any]] = None
 

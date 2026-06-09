@@ -18,7 +18,7 @@ try:
     import redis
 except Exception:
     redis = None
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 
 from app.agent.multimodal import (
     ALL_ALLOWED_EXTENSIONS,
@@ -31,6 +31,13 @@ from app.agent.multimodal import (
     validate_file_type,
 )
 from app.agent.verification import verify_attachment_with_neo4j
+from app.core.huggingface_vlm_client import (
+    HuggingFaceVlmError,
+    safe_vlm_error_message,
+    VlmModelsUnavailableError,
+    resolve_vlm_candidates,
+    availability_cache,
+)
 from app.core.config import settings
 from uuid import UUID
 from app.api.auth import get_current_user
@@ -101,9 +108,23 @@ def get_attachment_context_for_user(user_id: str, attachment_id: str) -> Optiona
 def _get_owned_attachment_or_404(user_id: str, attachment_id: str) -> dict[str, Any]:
     payload = get_attachment_context_for_user(user_id, attachment_id)
     if not payload:
-        raise HTTPException(status_code=404, detail="Attachment tidak ditemukan atau bukan milik user ini.")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "ATTACHMENT_NOT_FOUND",
+                "message": "Lampiran tidak ditemukan atau bukan milik pengguna.",
+                "retryable": False,
+            },
+        )
     if payload.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Anda tidak memiliki akses ke attachment ini.")
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "ACCESS_DENIED",
+                "message": "Anda tidak memiliki akses ke attachment ini.",
+                "retryable": False,
+            },
+        )
     return payload
 
 
@@ -125,6 +146,9 @@ def _attachment_response(payload: dict[str, Any]) -> dict[str, Any]:
         "confidence": float(payload.get("confidence") or 0.0),
         "retryable": bool(payload.get("retryable", processing_status == "failed")),
     }
+    for key in ["requested_model", "used_model", "fallback_used", "fallback_reason"]:
+        if key in payload:
+            response[key] = payload[key]
     if processing_status == "completed":
         analysis = payload.get("analysis") or {}
         response["extracted_text"] = analysis.get("extracted_text") or ""
@@ -193,7 +217,12 @@ async def _process_attachment_job(
         analysis = await process_attachment(filename=filename, mime_type=mime_type, content=content, user_query=None)
         analysis.attachment_id = attachment_id
         if analysis.extracted_text.strip():
-            analysis = await _verify_analysis_if_available(analysis)
+            try:
+                analysis = await _verify_analysis_if_available(analysis)
+            except Exception as neo4j_exc:
+                logger.error("Neo4j verification failed with unhandled exception: %s", neo4j_exc, exc_info=True)
+                analysis.verification_status = "unavailable"
+
         package = build_attachment_context_package(analysis)
         formatted_context = format_attachment_context_package(package)
         status = "completed" if analysis.extracted_text or analysis.verification_status != "failed" else "failed"
@@ -207,25 +236,77 @@ async def _process_attachment_job(
             "formatted_context": formatted_context,
             "retryable": status == "failed",
         }
+        for key in ["requested_model", "used_model", "fallback_used", "fallback_reason"]:
+            if key in analysis.structured_data:
+                updates[key] = analysis.structured_data[key]
         if status == "failed":
             updates["error"] = {"code": "VLM_PROCESSING_FAILED", "message": "Gambar belum berhasil dianalisis."}
         _update_attachment_payload(user_id, attachment_id, updates)
         logger.info(
-            "vlm_job_completed user_id=%s attachment_id=%s vlm_job_id=%s processing_ms=%s verification_status=%s",
+            "attachment_processing_completed user_id=%s attachment_id=%s vlm_job_id=%s processing_ms=%s verification_status=%s",
             user_id,
             attachment_id,
             vlm_job_id,
             int((time.perf_counter() - started) * 1000),
             analysis.verification_status,
         )
-    except Exception as exc:
-        logger.exception(
-            "vlm_job_failed user_id=%s attachment_id=%s vlm_job_id=%s error_type=%s processing_ms=%s",
+    except VlmModelsUnavailableError as exc:
+        logger.warning(
+            "vlm_job_failed code=VLM_ALL_MODELS_UNAVAILABLE user_id=%s attachment_id=%s vlm_job_id=%s failures=%s",
             user_id,
             attachment_id,
             vlm_job_id,
-            type(exc).__name__,
-            int((time.perf_counter() - started) * 1000),
+            exc.failures,
+        )
+        _update_attachment_payload(
+            user_id,
+            attachment_id,
+            {
+                "processing_status": "failed",
+                "progress": 100,
+                "verification_status": "not_started",
+                "confidence": 0.0,
+                "retryable": True,
+                "error": {
+                    "code": "VLM_ALL_MODELS_UNAVAILABLE",
+                    "message": "Seluruh layanan analisis gambar sedang tidak tersedia.",
+                    "retryable": True,
+                },
+            },
+        )
+    except HuggingFaceVlmError as exc:
+        logger.warning(
+            "vlm_job_failed VLM error user_id=%s attachment_id=%s vlm_job_id=%s code=%s message=%s",
+            user_id,
+            attachment_id,
+            vlm_job_id,
+            exc.code,
+            exc.message,
+        )
+        error_code = "VLM_MODEL_UNAVAILABLE" if exc.code == "model_not_supported" else "VLM_PROCESSING_FAILED"
+        message = "Model visual belum tersedia pada provider Hugging Face yang aktif." if exc.code == "model_not_supported" else "Gambar belum berhasil dianalisis."
+        _update_attachment_payload(
+            user_id,
+            attachment_id,
+            {
+                "processing_status": "failed",
+                "progress": 100,
+                "verification_status": "not_started" if exc.code == "model_not_supported" else "failed",
+                "confidence": 0.0,
+                "retryable": exc.retryable,
+                "error": {
+                    "code": error_code,
+                    "message": message,
+                    "retryable": exc.retryable,
+                },
+            },
+        )
+    except Exception as exc:
+        logger.exception(
+            "vlm_job_failed unhandled error user_id=%s attachment_id=%s vlm_job_id=%s",
+            user_id,
+            attachment_id,
+            vlm_job_id,
         )
         _update_attachment_payload(
             user_id,
@@ -236,12 +317,21 @@ async def _process_attachment_job(
                 "verification_status": "failed",
                 "confidence": 0.0,
                 "retryable": True,
-                "error": {"code": "VLM_PROCESSING_FAILED", "message": "Gambar belum berhasil dianalisis."},
+                "error": {
+                    "code": "ATTACHMENT_PROCESSING_FAILED",
+                    "message": "Gambar belum berhasil dianalisis.",
+                    "retryable": True,
+                },
             },
         )
 
 
-@router.post("/upload", response_model=UploadResponse, summary="Upload file untuk analisis attachment")
+@router.post(
+    "/upload",
+    response_model=UploadResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Upload file untuk analisis attachment",
+)
 async def upload_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -369,6 +459,7 @@ async def get_attachment_status(
 @router.post(
     "/{attachment_id}/retry",
     response_model=AttachmentRetryResponse,
+    status_code=status.HTTP_202_ACCEPTED,
     summary="Ulangi analisis attachment tanpa upload ulang",
 )
 async def retry_attachment(
@@ -378,17 +469,48 @@ async def retry_attachment(
 ) -> AttachmentRetryResponse:
     user_id = current_user.get("id")
     if not user_id:
-        raise HTTPException(status_code=401, detail="User tidak teridentifikasi.")
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "UNAUTHORIZED",
+                "message": "User tidak teridentifikasi.",
+                "retryable": False,
+            },
+        )
 
     attachment_id_str = str(attachment_id)
+    logger.info(
+        "attachment_retry_requested attachment_id=%s user_id=%s",
+        attachment_id_str,
+        user_id,
+    )
+
     payload = _get_owned_attachment_or_404(user_id, attachment_id_str)
+
+    # Validate model availability before enqueuing retry
+    try:
+        resolve_vlm_candidates()
+    except VlmModelsUnavailableError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "VLM_ALL_MODELS_UNAVAILABLE",
+                "message": "Belum ada model visual yang tersedia untuk percobaan ulang.",
+                "retryable": True,
+            },
+        )
+
+    if payload.get("processing_status") in {"queued", "processing"}:
+        response_data = _attachment_response(payload)
+        return AttachmentRetryResponse.model_validate(response_data)
+
     retry_count = int(payload.get("retry_count") or 0)
     if retry_count >= MAX_ATTACHMENT_RETRIES:
         raise HTTPException(
             status_code=429,
             detail={
-                "code": "ATTACHMENT_RETRY_LIMIT_REACHED",
-                "message": "Batas percobaan ulang analisis attachment telah tercapai.",
+                "code": "ATTACHMENT_RETRY_LIMIT",
+                "message": "Batas percobaan ulang telah tercapai.",
                 "retryable": False,
             },
         )

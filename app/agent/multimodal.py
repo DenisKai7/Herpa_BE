@@ -12,7 +12,15 @@ from typing import Any, Final, Optional
 from pydantic import BaseModel, Field, ValidationError
 
 from app.core.config import settings
-from app.core.huggingface_vlm_client import HuggingFaceVlmClient, HuggingFaceVlmError, preprocess_image as client_preprocess_image
+from app.core.huggingface_vlm_client import (
+    HuggingFaceVlmClient,
+    HuggingFaceVlmError,
+    VlmModelsUnavailableError,
+    VlmModelRoute,
+    availability_cache,
+    resolve_vlm_candidates,
+    preprocess_image as client_preprocess_image,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +77,12 @@ class VisualExtractionResult(BaseModel):
     tables: list[str] = Field(default_factory=list)
     confidence: float = 0.0
     warnings: list[str] = Field(default_factory=list)
-    model_id: str = settings.VLM_MODEL_ID
+    model_id: str = settings.VLM_PRIMARY_MODEL
     processing_ms: int = 0
+    requested_model: Optional[str] = None
+    used_model: Optional[str] = None
+    fallback_used: bool = False
+    fallback_reason: Optional[str] = None
 
 
 OcrExtractionResult = VisualExtractionResult
@@ -233,6 +245,10 @@ def _analysis_from_visual_result(*, filename: str, mime_type: str, content: byte
         "claims": result.claims,
         "uncertainties": result.uncertainties,
         "detected_type": result.detected_type if result.detected_type != "unknown" else heuristics["detected_type"],
+        "requested_model": result.requested_model,
+        "used_model": result.used_model,
+        "fallback_used": result.fallback_used,
+        "fallback_reason": result.fallback_reason,
     }
     return AttachmentAnalysisResult(
         filename=filename,
@@ -260,23 +276,132 @@ def _vlm_system_prompt() -> str:
     )
 
 
+async def analyze_with_fallback(
+    *,
+    image_bytes: bytes,
+    mime_type: str,
+    user_question: str,
+    system_prompt: str,
+    requested_model: str | None = None,
+) -> dict:
+    vlm_client = get_vlm_client()
+    route = resolve_vlm_candidates(requested_model)
+    failures: list[dict] = []
+    start_time = time.time()
+
+    for model_id in route.candidate_models:
+        if availability_cache.is_unavailable(model_id):
+            continue
+
+        try:
+            result = await vlm_client.analyze_image(
+                model_id=model_id,
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+                question=user_question,
+                system_prompt=system_prompt,
+            )
+
+            latency_ms = int((time.time() - start_time) * 1000)
+            fallback_used = model_id != (requested_model or route.candidate_models[0])
+            logger.info(
+                "vlm_request_completed requested_model=%s used_model=%s fallback_used=%s latency_ms=%d",
+                requested_model or route.candidate_models[0],
+                model_id,
+                str(fallback_used).lower(),
+                latency_ms,
+            )
+
+            return {
+                **result,
+                "requested_model": requested_model or route.candidate_models[0],
+                "used_model": model_id,
+                "fallback_used": fallback_used,
+                "model_failures": failures,
+            }
+
+        except HuggingFaceVlmError as exc:
+            failures.append({
+                "model_id": model_id,
+                "code": exc.code,
+            })
+
+            if exc.code == "model_not_supported":
+                availability_cache.mark_unavailable(
+                    model_id=model_id,
+                    reason=exc.code,
+                    ttl=settings.VLM_FAILURE_COOLDOWN_SECONDS,
+                )
+                logger.warning(
+                    "vlm_model_unavailable model_id=%s reason=%s cooldown_seconds=%d",
+                    model_id,
+                    exc.code,
+                    settings.VLM_FAILURE_COOLDOWN_SECONDS,
+                )
+            else:
+                if not exc.retryable:
+                    availability_cache.mark_unavailable(
+                        model_id=model_id,
+                        reason=exc.code,
+                        ttl=settings.VLM_FAILURE_COOLDOWN_SECONDS,
+                    )
+                logger.warning(
+                    "Remote VLM error: model=%s code=%s trying_next_candidate=true",
+                    model_id,
+                    exc.code,
+                )
+
+            continue
+        except Exception as exc:
+            logger.exception(
+                "Unexpected error on remote VLM model=%s",
+                model_id,
+            )
+            failures.append({
+                "model_id": model_id,
+                "code": "unexpected_error",
+            })
+            availability_cache.mark_unavailable(
+                model_id=model_id,
+                reason="unexpected_error",
+                ttl=settings.VLM_FAILURE_COOLDOWN_SECONDS,
+            )
+            continue
+
+    raise VlmModelsUnavailableError(
+        "Seluruh remote VLM tidak tersedia.",
+        failures=failures,
+    )
+
+
 async def _analyze_images_with_vlm(*, filename: str, mime_type: str, content: bytes, image_bytes: bytes, image_mime: str, user_query: str | None) -> AttachmentAnalysisResult:
     client = get_vlm_client()
     start = time.time()
     try:
         question = user_query or "Analisis gambar ini sesuai bukti visual. Keluarkan JSON valid sesuai schema."
-        response = await client.analyze_image(
+        response = await analyze_with_fallback(
             image_bytes=image_bytes,
             mime_type=image_mime,
-            question=question,
+            user_question=question,
             system_prompt=_vlm_system_prompt(),
         )
         raw = str(response.get("content") or "")
         try:
             structured = parse_vlm_json(raw)
         except (json.JSONDecodeError, ValidationError):
-            repaired = await client.repair_json(raw_text=raw, system_prompt="Anda memperbaiki output menjadi JSON valid sesuai schema visual.")
+            repaired = await client.repair_json(
+                model_id=response.get("used_model"),
+                raw_text=raw,
+                system_prompt="Anda memperbaiki output menjadi JSON valid sesuai schema visual."
+            )
             structured = parse_vlm_json(repaired)
+
+        fallback_reason = None
+        if response.get("fallback_used"):
+            failures = response.get("model_failures") or []
+            if failures:
+                fallback_reason = failures[0].get("code")
+
         visual = VisualExtractionResult(
             success=True,
             raw_text="\n".join(part for part in [structured.visual_description, structured.extracted_text] if part),
@@ -289,12 +414,20 @@ async def _analyze_images_with_vlm(*, filename: str, mime_type: str, content: by
             claims=structured.claims,
             uncertainties=structured.uncertainties,
             confidence=max(0.0, min(1.0, structured.confidence)),
-            model_id=str(response.get("model") or settings.VLM_MODEL_ID),
+            model_id=str(response.get("used_model") or settings.VLM_PRIMARY_MODEL),
             processing_ms=int((time.time() - start) * 1000),
+            requested_model=response.get("requested_model"),
+            used_model=response.get("used_model"),
+            fallback_used=bool(response.get("fallback_used")),
+            fallback_reason=fallback_reason,
         )
         return _analysis_from_visual_result(filename=filename, mime_type=mime_type, content=content, result=visual, method="hf-vlm")
-    except HuggingFaceVlmError as exc:
-        return AttachmentAnalysisResult(filename=filename, mime_type=mime_type, file_sha256=calculate_sha256(content), extraction_method="hf-vlm", extracted_text="", structured_data={"detected_type": "unknown"}, verification_status="failed", confidence=0.0, warnings=[exc.code], processing_ms=int((time.time() - start) * 1000))
+    except (HuggingFaceVlmError, VlmModelsUnavailableError) as exc:
+        if isinstance(exc, HuggingFaceVlmError):
+            logger.error("HuggingFaceVlmError during VLM image analysis: code=%s message=%s", exc.code, exc.message)
+        else:
+            logger.error("VlmModelsUnavailableError during VLM image analysis: message=%s", exc.message)
+        raise exc
 
 
 def _extract_docx_text(content: bytes) -> str:

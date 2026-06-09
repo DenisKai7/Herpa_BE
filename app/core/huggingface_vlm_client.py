@@ -8,8 +8,144 @@ from typing import Any
 
 import httpx
 from PIL import Image, ImageOps
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+# Model Registry
+REMOTE_VLM_REGISTRY = {
+    "zai-org/GLM-4.5V:cheapest": {
+        "supports_images": True,
+        "enabled": True,
+        "priority": 1,
+    },
+    "CohereLabs/command-a-vision-07-2025:cohere": {
+        "supports_images": True,
+        "enabled": True,
+        "priority": 2,
+    },
+    "Qwen/Qwen2.5-VL-7B-Instruct": {
+        "supports_images": True,
+        "enabled": False,
+        "disabled_reason": "model_not_supported",
+        "priority": 99,
+    },
+}
+
+
+class VlmModelsUnavailableError(RuntimeError):
+    def __init__(self, message: str, failures: list[dict] = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.failures = failures or []
+
+
+class VlmModelRoute(BaseModel):
+    requested_model: str | None
+    candidate_models: list[str]
+
+
+class AvailabilityCache:
+    def __init__(self) -> None:
+        self._cache: dict[str, tuple[float, str]] = {}
+
+    def mark_unavailable(self, model_id: str, reason: str, ttl: int) -> None:
+        expire_time = time.time() + ttl
+        self._cache[model_id] = (expire_time, reason)
+        logger.warning(
+            "AvailabilityCache: marked %s unavailable for %d seconds. Reason: %s",
+            model_id,
+            ttl,
+            reason,
+        )
+
+    def is_unavailable(self, model_id: str) -> bool:
+        if model_id not in self._cache:
+            return False
+        expire_time, _ = self._cache[model_id]
+        if time.time() > expire_time:
+            if model_id in self._cache:
+                del self._cache[model_id]
+            return False
+        return True
+
+    def get_reason(self, model_id: str) -> str | None:
+        if model_id not in self._cache:
+            return None
+        expire_time, reason = self._cache[model_id]
+        if time.time() > expire_time:
+            if model_id in self._cache:
+                del self._cache[model_id]
+            return None
+        return reason
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+
+class ModelHealthCache:
+    def __init__(self) -> None:
+        self._cache: dict[str, tuple[float, bool, str | None]] = {}
+
+    def get(self, model_id: str) -> tuple[bool, str | None] | None:
+        if model_id not in self._cache:
+            return None
+        expire_time, available, reason = self._cache[model_id]
+        if time.time() > expire_time:
+            if model_id in self._cache:
+                del self._cache[model_id]
+            return None
+        return available, reason
+
+    def set(self, model_id: str, available: bool, reason: str | None, ttl: int) -> None:
+        self._cache[model_id] = (time.time() + ttl, available, reason)
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+
+availability_cache = AvailabilityCache()
+model_health_cache = ModelHealthCache()
+
+
+def resolve_vlm_candidates(
+    requested_model: str | None = None,
+) -> VlmModelRoute:
+    from app.core.config import settings
+
+    candidates: list[str] = []
+
+    if (
+        requested_model
+        and requested_model in REMOTE_VLM_REGISTRY
+        and REMOTE_VLM_REGISTRY[requested_model].get("enabled", False)
+        and REMOTE_VLM_REGISTRY[requested_model].get("supports_images", False)
+        and not availability_cache.is_unavailable(requested_model)
+    ):
+        candidates.append(requested_model)
+
+    for model in settings.vlm_model_candidates:
+        config = REMOTE_VLM_REGISTRY.get(model, {})
+
+        if not config.get("enabled", True):
+            continue
+
+        if not config.get("supports_images", False):
+            continue
+
+        if availability_cache.is_unavailable(model):
+            continue
+
+        if model not in candidates:
+            candidates.append(model)
+
+    if not candidates:
+        raise VlmModelsUnavailableError("Tidak ada remote VLM yang aktif.")
+
+    return VlmModelRoute(
+        requested_model=requested_model,
+        candidate_models=candidates,
+    )
 
 
 class HuggingFaceVlmError(RuntimeError):
@@ -80,7 +216,7 @@ def classify_hf_vlm_error(status_code: int, response_body: str) -> str:
 
 def safe_vlm_error_message(code: str) -> str:
     return {
-        "model_not_supported": "Model visual belum tersedia pada Hugging Face Inference Provider yang aktif.",
+        "model_not_supported": "Model visual belum tersedia pada provider Hugging Face yang aktif.",
         "invalid_request": "Permintaan analisis visual tidak valid.",
         "authentication_failed": "HF_API_TOKEN tidak valid atau sudah kedaluwarsa.",
         "access_denied": "Token tidak memiliki izin Hugging Face Inference Providers untuk model ini.",
@@ -137,7 +273,18 @@ def create_data_uri(
 class HuggingFaceVlmClient:
     def __init__(self, settings) -> None:
         self.settings = settings
+        base_url = settings.VLM_ROUTER_BASE_URL.rstrip("/")
+        if settings.VLM_BACKEND == "hf_endpoint" and settings.VLM_ENDPOINT_URL:
+            endpoint = settings.VLM_ENDPOINT_URL.rstrip("/")
+            if endpoint.endswith("/chat/completions"):
+                base_url = endpoint[:-17]
+            elif endpoint.endswith("/v1"):
+                base_url = endpoint
+            else:
+                base_url = endpoint + "/v1"
+
         self.client = httpx.AsyncClient(
+            base_url=base_url,
             timeout=httpx.Timeout(
                 connect=settings.VLM_CONNECT_TIMEOUT_SECONDS,
                 read=settings.VLM_REQUEST_TIMEOUT_SECONDS,
@@ -200,18 +347,20 @@ class HuggingFaceVlmClient:
     async def analyze_image(
         self,
         *,
+        model_id: str | None = None,
         image_bytes: bytes,
         mime_type: str,
         question: str,
         system_prompt: str,
     ) -> dict:
+        target_model = model_id or self.settings.VLM_PRIMARY_MODEL
         data_uri = create_data_uri(
             image_bytes,
             mime_type,
         )
 
         payload = {
-            "model": self.settings.VLM_MODEL_ID,
+            "model": target_model,
             "messages": [
                 {
                     "role": "system",
@@ -242,13 +391,17 @@ class HuggingFaceVlmClient:
         }
 
         last_error = None
+        max_retries = getattr(self.settings, "VLM_MAX_RETRIES_PER_MODEL", 1)
+        logger.info(
+            "vlm_request_started model=%s endpoint=%s",
+            target_model,
+            self.endpoint_url(),
+        )
 
-        for attempt in range(
-            self.settings.VLM_MAX_RETRIES + 1
-        ):
+        for attempt in range(max_retries + 1):
             try:
                 response = await self.client.post(
-                    self.endpoint_url(),
+                    "/chat/completions",
                     headers={
                         "Authorization": (
                             "Bearer "
@@ -271,7 +424,7 @@ class HuggingFaceVlmClient:
                         ),
                         "model": result.get(
                             "model",
-                            self.settings.VLM_MODEL_ID,
+                            target_model,
                         ),
                         "usage": result.get("usage"),
                     }
@@ -281,14 +434,18 @@ class HuggingFaceVlmClient:
                     response.text,
                 )
 
-                # Log only status code, error classification, request ID, model ID
                 request_id = response.headers.get("x-request-id", "unknown")
-                logger.error(
-                    "VLM request failed: status_code=%s error_classification=%s request_id=%s model_id=%s",
+                log_message = (
+                    "vlm_model_unavailable status_code=%s reason=%s request_id=%s model_id=%s"
+                    if code == "model_not_supported"
+                    else "vlm_request_failed status_code=%s error_classification=%s request_id=%s model_id=%s"
+                )
+                logger.warning(
+                    log_message,
                     response.status_code,
                     code,
                     request_id,
-                    self.settings.VLM_MODEL_ID,
+                    target_model,
                 )
 
                 retryable = code in {
@@ -324,7 +481,7 @@ class HuggingFaceVlmClient:
                     retryable=True,
                 )
 
-            if attempt < self.settings.VLM_MAX_RETRIES:
+            if attempt < max_retries:
                 await asyncio.sleep(2)
 
         raise last_error or HuggingFaceVlmError(
@@ -333,9 +490,10 @@ class HuggingFaceVlmClient:
             retryable=True,
         )
 
-    async def repair_json(self, *, raw_text: str, system_prompt: str) -> str:
+    async def repair_json(self, *, model_id: str | None = None, raw_text: str, system_prompt: str) -> str:
+        target_model = model_id or self.settings.VLM_PRIMARY_MODEL
         payload = {
-            "model": self.settings.VLM_MODEL_ID,
+            "model": target_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {
@@ -349,7 +507,7 @@ class HuggingFaceVlmClient:
 
         try:
             response = await self.client.post(
-                self.endpoint_url(),
+                "/chat/completions",
                 headers={
                     "Authorization": f"Bearer {self.settings.HF_API_TOKEN}",
                     "Content-Type": "application/json",
@@ -363,48 +521,89 @@ class HuggingFaceVlmClient:
             logger.warning("VLM repair_json failed: %s", exc)
         return raw_text
 
-    async def healthcheck(self) -> dict[str, Any]:
-        base = {
-            "backend": self.settings.VLM_BACKEND,
-            "model_id": self.settings.VLM_MODEL_ID,
-            "local_inference": False,
-        }
+    async def probe_model(self, model_id: str) -> tuple[bool, str | None]:
+        # 1. Check fail cooldown first
+        if availability_cache.is_unavailable(model_id):
+            return False, availability_cache.get_reason(model_id)
 
-        now = time.monotonic()
-        cache_ttl = getattr(self.settings, "VLM_HEALTHCHECK_CACHE_SECONDS", 600)
-        if self._health_cache and (now - self._health_cache[0] < cache_ttl):
-            return self._health_cache[1]
+        # 2. Check static config if disabled
+        config = REMOTE_VLM_REGISTRY.get(model_id, {})
+        if not config.get("enabled", True):
+            return False, config.get("disabled_reason", "disabled")
+
+        # 3. Check probe cache
+        cached = model_health_cache.get(model_id)
+        if cached is not None:
+            return cached
+
+        # 4. Perform actual probe using a tiny image
+        from PIL import Image
+        import io
+        img = Image.new("RGB", (64, 64), color="white")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        tiny_image_bytes = buf.getvalue()
 
         try:
-            payload = {
-                "model": self.settings.VLM_MODEL_ID,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "ping"
-                    }
-                ],
-                "max_tokens": 5,
-                "temperature": 0.1,
-            }
+            # We call analyze_image with a very simple prompt
+            await self.analyze_image(
+                model_id=model_id,
+                image_bytes=tiny_image_bytes,
+                mime_type="image/jpeg",
+                question="ping",
+                system_prompt="respond json with success true",
+            )
+            model_health_cache.set(
+                model_id,
+                True,
+                None,
+                self.settings.VLM_AVAILABILITY_CACHE_SECONDS,
+            )
+            return True, None
+        except HuggingFaceVlmError as exc:
+            reason = exc.code
+            model_health_cache.set(
+                model_id,
+                False,
+                reason,
+                self.settings.VLM_AVAILABILITY_CACHE_SECONDS,
+            )
+            availability_cache.mark_unavailable(
+                model_id, reason, self.settings.VLM_FAILURE_COOLDOWN_SECONDS
+            )
+            return False, reason
+        except Exception as exc:
+            reason = "provider_error"
+            model_health_cache.set(
+                model_id,
+                False,
+                reason,
+                self.settings.VLM_AVAILABILITY_CACHE_SECONDS,
+            )
+            availability_cache.mark_unavailable(
+                model_id, reason, self.settings.VLM_FAILURE_COOLDOWN_SECONDS
+            )
+            return False, reason
 
-            response = await self.client.post(
-                self.endpoint_url(),
-                headers={
-                    "Authorization": f"Bearer {self.settings.HF_API_TOKEN}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
+    async def healthcheck(self) -> dict[str, Any]:
+        models_info = []
+        for model_id in REMOTE_VLM_REGISTRY.keys():
+            available, reason = await self.probe_model(model_id)
+            is_cached = (
+                model_health_cache.get(model_id) is not None
+                or availability_cache.is_unavailable(model_id)
             )
 
-            if response.is_success:
-                result = {**base, "available": True}
+            info = {"model_id": model_id, "available": available}
+            if available:
+                info["cached"] = is_cached
             else:
-                code = classify_vlm_error(response.status_code, response.text)
-                result = {**base, "available": False, "reason": code}
-        except Exception as exc:
-            logger.warning("VLM healthcheck connection failed: %s", exc)
-            result = {**base, "available": False, "reason": "provider_error"}
+                info["reason"] = reason or "disabled"
+            models_info.append(info)
 
-        self._health_cache = (now, result)
-        return result
+        return {
+            "backend": self.settings.VLM_BACKEND,
+            "local_inference": False,
+            "primary_model": self.settings.VLM_PRIMARY_MODEL,
+            "models": models_info,
+        }
