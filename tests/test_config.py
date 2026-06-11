@@ -31,6 +31,18 @@ def test_config_module_import():
     assert settings.APP_NAME
 
 
+def test_herbal_recommendation_defaults():
+    settings = Settings()
+
+    assert settings.HERBAL_RECOMMENDATION_MODEL == "Qwen/Qwen2.5-7B-Instruct"
+    assert settings.HERBAL_RECOMMENDATION_MAX_TOKENS == 1400
+    assert settings.HERBAL_RECOMMENDATION_TEMPERATURE == 0.15
+    assert settings.HERBAL_RECOMMENDATION_TIMEOUT_SECONDS == 90
+    assert settings.HERBAL_RECOMMENDATION_MAX_RETRIES == 1
+    assert settings.HERBAL_RECOMMENDATION_MAX_RESULTS == 20
+    assert settings.HERBAL_RECOMMENDATION_MIN_SCORE == 0.45
+
+
 def test_vlm_defaults():
     settings = Settings()
 

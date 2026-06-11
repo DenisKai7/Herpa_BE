@@ -62,6 +62,21 @@ class Settings(BaseSettings):
     ALLOW_MODEL_FALLBACK: bool = True
     MODEL_HEALTHCHECK_ENABLED: bool = True
 
+    # Herbal recommendation pipeline
+    HERBAL_RECOMMENDATION_MODEL: str = "Qwen/Qwen2.5-7B-Instruct"
+    HERBAL_RECOMMENDATION_MAX_TOKENS: int = 1400
+    HERBAL_RECOMMENDATION_TEMPERATURE: float = 0.15
+    HERBAL_RECOMMENDATION_TIMEOUT_SECONDS: int = 90
+    HERBAL_RECOMMENDATION_MAX_RETRIES: int = 1
+    HERBAL_RECOMMENDATION_MAX_RESULTS: int = 20
+    HERBAL_RECOMMENDATION_MIN_SCORE: float = 0.45
+
+    # Herbal graph query timeouts
+    HERBAL_GRAPH_QUERY_TIMEOUT_SECONDS: int = 20
+    HERBAL_GRAPH_BASE_QUERY_TIMEOUT_SECONDS: int = 15
+    HERBAL_GRAPH_ENRICHMENT_TIMEOUT_SECONDS: int = 8
+    HERBAL_GRAPH_MAX_RETRIES: int = 1
+
     # Backward compatibility for persona routing
     MODEL_MEDIS_1: str = "Qwen/Qwen2.5-7B-Instruct"
     MODEL_MEDIS_2: str = "Qwen/Qwen2.5-7B-Instruct"

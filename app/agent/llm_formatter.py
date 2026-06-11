@@ -15,6 +15,7 @@ from app.agent.prompts import build_system_prompt
 logger = logging.getLogger(__name__)
 
 
+
 _client = InferenceClient(
     provider="auto",
     api_key=settings.HF_API_TOKEN,

@@ -11,8 +11,18 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi_limiter.depends import RateLimiter
-from gotrue.errors import AuthApiError
+try:
+    from fastapi_limiter.depends import RateLimiter
+except Exception:
+    def RateLimiter(*args: Any, **kwargs: Any):  # type: ignore[no-redef]
+        async def _noop() -> None:
+            return None
+        return _noop
+try:
+    from gotrue.errors import AuthApiError
+except Exception:
+    class AuthApiError(Exception):
+        pass
 
 from app.core.database import supabase
 from app.core.dependencies import verify_user

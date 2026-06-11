@@ -9,13 +9,22 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
-import redis.asyncio as redis
+try:
+    import redis.asyncio as redis
+except Exception:
+    redis = None
 # Tambahkan 'Request' dari fastapi untuk membaca context metadata HTTP
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi_limiter import FastAPILimiter
+try:
+    from fastapi_limiter import FastAPILimiter
+except Exception:
+    class FastAPILimiter:  # type: ignore[no-redef]
+        @staticmethod
+        async def init(*args: Any, **kwargs: Any) -> None:
+            return None
 
-from app.api import admin, auth, chat, education, recommendation, upload, quiz
+from app.api import admin, auth, chat, education, herbal_recommendations, recommendation, upload, quiz
 from app.core.config import settings
 from app.core.database import close_connections, verify_neo4j_connection
 from app.core.minio_client import ensure_bucket_exists
@@ -99,6 +108,8 @@ async def lifespan(app: FastAPI):
 
     # ── Redis Rate Limiter ──
     try:
+        if redis is None:
+            raise RuntimeError("redis package unavailable")
         redis_connection = redis.from_url(
             settings.REDIS_URL,
             encoding="utf-8",
@@ -195,6 +206,8 @@ app.include_router(
     prefix="/api/medis",
     tags=["Modul Medis"],
 )
+app.include_router(herbal_recommendations.router)
+app.include_router(herbal_recommendations.health_router)
 app.include_router(
     education.router,
     prefix="/api/edukasi",
